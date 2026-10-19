@@ -1,0 +1,97 @@
+// Vaultic assistant — Prisma 7 (PrismaPg adapter; url comes from prisma.config.ts)
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  admin
+  user
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  passwordHash String
+  role         Role       @default(user)
+  createdAt    DateTime   @default(now())
+  sessions     Session[]
+  auditLogs    AuditLog[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  userAgent String?
+  ipAddress String?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Immutable, append-only record of every Q&A — the product's audit/evidence core.
+/// Stores the question, the answer, and the exact sources the model was given.
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  userEmail  String
+  question   String
+  answer     String
+  sources    Json // [{ sourceName, chunk, score, snippet }]
+  model      String
+  collection String
+  createdAt  DateTime @default(now())
+  // Tamper-evident hash chain (see src/lib/audit.ts). Default "" so a `db push`
+  // onto a pre-existing table succeeds; legacy rows read as pre-chain.
+  prevHash   String   @default("")
+  entryHash  String   @default("")
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([userEmail])
+}
+
+/// Metadata for ingested documents (what is indexed in the knowledge store).
+model Document {
+  id                String   @id @default(cuid())
+  collection        String
+  sourceName        String
+  chunks            Int      @default(0)
+  ingestedById      String?
+  createdAt         DateTime @default(now())
+  // Permission-aware retrieval: "all" = any authenticated user may retrieve it;
+  // "admin" = admin-only. Stored here AND in the Qdrant payload so search can
+  // filter by the requester's role. Legacy points without the payload key are
+  // treated as admin-only (the conservative default).
+  visibility        String   @default("all")
+  // Security screening at ingest (src/lib/guard.ts + pii.ts).
+  quarantined       Boolean  @default(false) // injection/poisoning suspected → NOT indexed
+  piiRedactions     Int      @default(0)
+  injectionFindings Json? // [{ rule, severity, excerpt }]
+
+  @@index([collection])
+}
+
+/// Brute-force protection state for the login route. Postgres-backed because
+/// Vaultic ships no Redis. One row per (scope, identifier):
+///   scope "ip"      — request counter per client IP   → rate limit (fail-open)
+///   scope "account" — failed-login counter per email  → lockout    (fail-closed)
+/// Rows are self-expiring by logic (the window resets on read) and cleared on a
+/// successful login; no separate reaper is needed for v0's single-node use.
+model LoginThrottle {
+  scope       String // "ip" | "account"
+  identifier  String // client IP (rate limit) or lowercased email (lockout)
+  count       Int       @default(0)
+  windowStart DateTime  @default(now())
+  lockedUntil DateTime?
+  updatedAt   DateTime  @updatedAt
+
+  @@id([scope, identifier])
+  @@index([lockedUntil])
+}

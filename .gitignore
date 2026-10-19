@@ -1,0 +1,16 @@
+# never commit secrets, deps, or build output
+.env
+.env.*
+!.env.example
+node_modules/
+.next/
+out/
+dist/
+coverage/
+*.tsbuildinfo
+.DS_Store
+*.log
+sbom.json
+
+# test-upload artifacts — user documents never belong in git
+*.pdf
