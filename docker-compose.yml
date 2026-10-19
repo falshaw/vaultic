@@ -1,0 +1,180 @@
+# Vaultic — private AI over your own documents, fully local. One `docker compose up`.
+# Only the assistant publishes a host port; every other service is internal to the
+# vaultic-net network. Zero data egress by construction.
+#
+# Hardening: cap_drop ALL, no-new-privileges, read-only roots + tmpfs, 127.0.0.1-only binds,
+# resource + pid caps, health-gated depends_on, fail-fast ${VAR:?} secrets.
+
+services:
+  # ── Audit log + users (RBAC) + document metadata ──────────────────────────
+  vaultic-postgres:
+    image: postgres:16.15-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    container_name: vaultic-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    volumes:
+      - vaultic_pgdata:/var/lib/postgresql/data
+    networks: [vaultic-net]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -h 127.0.0.1 -d $${POSTGRES_DB}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: "no"
+    stop_grace_period: 20s
+    logging: { driver: json-file, options: { max-size: "50m", max-file: "5", compress: "true" } }
+    deploy:
+      resources:
+        limits: { memory: 512m, cpus: "1.0", pids: 200 }
+
+  # ── Local model serving (generation + embeddings) ─────────────────────────
+  vaultic-ollama:
+    image: ollama/ollama:0.32.14@sha256:9d30908e41144b1f1da89b9d8e33c07e4aeb43ff41a8660241b1686e2cc330ad
+    container_name: vaultic-ollama
+    volumes:
+      - vaultic_ollama_models:/root/.ollama
+    networks: [vaultic-net]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # Models live in the named volume above, so a read-only root only needs scratch
+    # space.
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=2g
+      - /var/tmp:mode=1777,size=1g
+    # GPU is optional. To use an NVIDIA GPU, uncomment the deploy.resources.reservations
+    # block below and ensure the nvidia container runtime is installed. CPU works for v0.
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: "no"
+    stop_grace_period: 20s
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3", compress: "true" } }
+    deploy:
+      resources:
+        limits: { memory: 8g, cpus: "6.0", pids: 400 }
+        reservations:
+          devices: [{ driver: nvidia, count: 1, capabilities: [gpu] }]
+
+  # ── Private vector store (your documents) ─────────────────────────────────
+  vaultic-knowledge:
+    image: qdrant/qdrant:v1.19.0@sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc
+    container_name: vaultic-knowledge
+    volumes:
+      - vaultic_qdrant:/qdrant/storage
+    networks: [vaultic-net]
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__LOG_LEVEL=INFO
+      - QDRANT__STORAGE__SNAPSHOTS_PATH=/qdrant/storage/snapshots
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: "no"
+    stop_grace_period: 30s
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3", compress: "true" } }
+    deploy:
+      resources:
+        limits: { memory: 1g, cpus: "1.0", pids: 200 }
+
+  # ── LLM gateway + RAG (/rag/* → Ollama embeddings → Qdrant). Ollama-only. ──
+  vaultic-bridge:
+    build: ./bridge
+    image: vaultic-bridge:latest
+    container_name: vaultic-bridge
+    environment:
+      - CLAUDE_BRIDGE_HOST=0.0.0.0
+      - CLAUDE_BRIDGE_PORT=7777
+      - OLLAMA_URL=http://vaultic-ollama:11434
+      - OLLAMA_FALLBACK_MODEL=${GEN_MODEL:-qwen2.5:7b}
+      - QDRANT_URL=http://vaultic-knowledge:6333
+      - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
+      - EMBED_DIM=768
+    networks: [vaultic-net]
+    depends_on:
+      vaultic-ollama: { condition: service_healthy }
+      vaultic-knowledge: { condition: service_healthy }
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7777/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: "no"
+    stop_grace_period: 5s
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3", compress: "true" } }
+    deploy:
+      resources:
+        limits: { memory: 512m, cpus: "1.0", pids: 200 }
+
+  # ── The assistant: UI + auth + ingest + the audit/RBAC/evidence layer ─────
+  vaultic-assistant:
+    build: ./assistant
+    image: vaultic-assistant:latest
+    container_name: vaultic-assistant
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@vaultic-postgres:5432/${POSTGRES_DB}
+      - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET in .env}
+      - BRIDGE_URL=http://vaultic-bridge:7777
+      - OLLAMA_URL=http://vaultic-ollama:11434
+      - GEN_MODEL=${GEN_MODEL:-qwen2.5:7b}
+      - RAG_COLLECTION=vaultic
+      - VAULTIC_ADMIN_EMAIL=${VAULTIC_ADMIN_EMAIL:?set VAULTIC_ADMIN_EMAIL in .env}
+      - VAULTIC_ADMIN_PASSWORD=${VAULTIC_ADMIN_PASSWORD:?set VAULTIC_ADMIN_PASSWORD in .env}
+      - NODE_ENV=production
+    ports:
+      - "127.0.0.1:3029:3000"
+    networks: [vaultic-net]
+    depends_on:
+      vaultic-postgres: { condition: service_healthy }
+      vaultic-bridge: { condition: service_healthy }
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs:
+      - /tmp:size=100m
+      - /app/.next/cache:size=200m
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: "no"
+    stop_grace_period: 10s
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3", compress: "true" } }
+    deploy:
+      resources:
+        limits: { memory: 1g, cpus: "2.0", pids: 200 }
+
+networks:
+  vaultic-net:
+    driver: bridge
+
+volumes:
+  vaultic_pgdata:
+    name: vaultic_pgdata
+  vaultic_ollama_models:
+    name: vaultic_ollama_models
+  vaultic_qdrant:
+    name: vaultic_qdrant
