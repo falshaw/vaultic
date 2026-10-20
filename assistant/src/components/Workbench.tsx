@@ -1,29 +1,71 @@
 "use client";
 
-import { useState } from "react";
-import Nav from "@/components/Nav";
+import { Fragment, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { FilePlus2, X } from "lucide-react";
 
-interface Cite { sourceName?: string; chunk?: number; score?: number; snippet?: string; }
-interface Msg { role: "user" | "ai"; text: string; cites?: Cite[]; }
+interface Source {
+  sourceName?: string;
+  chunk?: number;
+  score?: number;
+  snippet?: string;
+  redactions?: number;
+}
+interface Turn {
+  question: string;
+  answer: string;
+  sources: Source[];
+  done: boolean;
+  piiRedacted: number;
+  auditHash: string | null;
+  error?: string;
+}
+type IngestResult = { tone: "ok" | "warn" | "bad"; text: string };
 
-export default function Workbench({ email, role }: { email: string; role: "admin" | "user" }) {
-  const [log, setLog] = useState<Msg[]>([]);
+const SESSION_EXPIRED = "/login";
+
+/** Splits a chunk into text and highlighted [REDACTED:*] markers. */
+function withMarkers(text: string) {
+  return text.split(/(\[REDACTED:[A-Z-]+\])/g).map((part, i) =>
+    /^\[REDACTED:/.test(part) ? (
+      <span className="s" key={i}>{part}</span>
+    ) : (
+      <Fragment key={i}>{part}</Fragment>
+    ),
+  );
+}
+
+function cite(s: Source) {
+  return `${s.sourceName ?? "source"}${s.chunk != null ? ` · chunk ${s.chunk}` : ""}`;
+}
+
+export default function Workbench({ isAdmin, model }: { isAdmin: boolean; model: string }) {
+  const [turns, setTurns] = useState<Turn[]>([]);
+  const [selected, setSelected] = useState(0);
   const [q, setQ] = useState("");
   const [asking, setAsking] = useState(false);
 
+  const [showIngest, setShowIngest] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
+  const [fileKey, setFileKey] = useState(0);
   const [srcName, setSrcName] = useState("");
   const [srcText, setSrcText] = useState("");
-  const [file, setFile] = useState<File | null>(null);
   const [visibility, setVisibility] = useState<"all" | "admin">("all");
   const [ingesting, setIngesting] = useState(false);
-  const [ingestMsg, setIngestMsg] = useState("");
+  const [ingestResult, setIngestResult] = useState<IngestResult | null>(null);
+  const questionRef = useRef<HTMLInputElement>(null);
+  const router = useRouter();
+
+  function patchLast(fn: (t: Turn) => Turn) {
+    setTurns((all) => (all.length ? [...all.slice(0, -1), fn(all[all.length - 1])] : all));
+  }
 
   async function ask(e: React.FormEvent) {
     e.preventDefault();
     const question = q.trim();
     if (!question || asking) return;
-    // user message + an empty AI placeholder we stream into
-    setLog((l) => [...l, { role: "user", text: question }, { role: "ai", text: "", cites: [] }]);
+    setSelected(turns.length);
+    setTurns((all) => [...all, { question, answer: "", sources: [], done: false, piiRedacted: 0, auditHash: null }]);
     setQ("");
     setAsking(true);
     try {
@@ -32,12 +74,16 @@ export default function Workbench({ email, role }: { email: string; role: "admin
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ question }),
       });
-      if (!res.ok || !res.body) {
-        const j = await res.json().catch(() => ({}));
-        updateLast((m) => ({ ...m, text: `Error: ${j.error ?? res.status}` }));
+      if (res.status === 401) {
+        router.push(SESSION_EXPIRED);
         return;
       }
-      // Read the NDJSON stream: {type:"sources"|"token"|"error"|"done"} per line.
+      if (!res.ok || !res.body) {
+        const j = await res.json().catch(() => ({}));
+        patchLast((t) => ({ ...t, done: true, error: j.error ?? `Request failed (${res.status})` }));
+        return;
+      }
+      // NDJSON stream: {type: "sources" | "token" | "error" | "done"} per line.
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
@@ -50,38 +96,33 @@ export default function Workbench({ email, role }: { email: string; role: "admin
           const line = buf.slice(0, nl).trim();
           buf = buf.slice(nl + 1);
           if (!line) continue;
-          let ev: { type: string; sources?: Cite[]; text?: string; error?: string };
+          let ev: { type: string; sources?: Source[]; text?: string; error?: string; piiRedacted?: number; auditHash?: string | null };
           try {
             ev = JSON.parse(line);
           } catch {
             continue;
           }
-          if (ev.type === "sources") updateLast((m) => ({ ...m, cites: ev.sources ?? [] }));
-          else if (ev.type === "token") updateLast((m) => ({ ...m, text: m.text + (ev.text ?? "") }));
-          else if (ev.type === "error") updateLast((m) => ({ ...m, text: m.text + `\n[generation error: ${ev.error}]` }));
+          if (ev.type === "sources") patchLast((t) => ({ ...t, sources: ev.sources ?? [] }));
+          else if (ev.type === "token") patchLast((t) => ({ ...t, answer: t.answer + (ev.text ?? "") }));
+          else if (ev.type === "error") patchLast((t) => ({ ...t, error: ev.error ?? "Generation failed" }));
+          else if (ev.type === "done")
+            patchLast((t) => ({ ...t, done: true, piiRedacted: ev.piiRedacted ?? 0, auditHash: ev.auditHash ?? null }));
         }
       }
+      patchLast((t) => ({ ...t, done: true }));
     } catch {
-      updateLast((m) => ({ ...m, text: m.text || "Network error" }));
+      patchLast((t) => ({ ...t, done: true, error: t.error ?? "Network error" }));
     } finally {
       setAsking(false);
+      questionRef.current?.focus();
     }
-  }
-
-  function updateLast(fn: (m: Msg) => Msg) {
-    setLog((l) => {
-      if (l.length === 0) return l;
-      const copy = l.slice();
-      copy[copy.length - 1] = fn(copy[copy.length - 1]);
-      return copy;
-    });
   }
 
   async function ingest(e: React.FormEvent) {
     e.preventDefault();
     if (ingesting || (!file && !srcText.trim())) return;
     setIngesting(true);
-    setIngestMsg("");
+    setIngestResult(null);
     try {
       let res: Response;
       if (file) {
@@ -97,41 +138,74 @@ export default function Workbench({ email, role }: { email: string; role: "admin
           body: JSON.stringify({ sourceName: srcName.trim() || "pasted-document", text: srcText, visibility }),
         });
       }
+      if (res.status === 401) {
+        router.push(SESSION_EXPIRED);
+        return;
+      }
       const j = await res.json().catch(() => ({}));
-      if (res.ok) {
-        setIngestMsg(j.warning ?? `Indexed “${j.sourceName}” (${j.chunks ?? "?"} chunks).`);
-        if (!j.quarantined) { setSrcText(""); setSrcName(""); setFile(null); }
+      if (!res.ok) {
+        setIngestResult({ tone: "bad", text: j.error ?? `Ingest failed (${res.status})` });
+      } else if (j.quarantined) {
+        setIngestResult({ tone: "bad", text: j.warning ?? "Quarantined, not indexed." });
       } else {
-        setIngestMsg(`Error: ${j.error ?? res.status}`);
+        const who = j.visibility === "admin" ? "admins only" : "all users";
+        const pii = j.piiRedactions ? ` ${j.piiRedactions} PII value${j.piiRedactions === 1 ? "" : "s"} redacted before storage.` : "";
+        setIngestResult({ tone: j.piiRedactions ? "warn" : "ok", text: `Indexed “${j.sourceName}”: ${j.chunks} chunk${j.chunks === 1 ? "" : "s"}, visible to ${who}.${pii}` });
+        setFile(null);
+        setFileKey((k) => k + 1);
+        setSrcName("");
+        setSrcText("");
       }
     } catch {
-      setIngestMsg("Network error");
+      setIngestResult({ tone: "bad", text: "Network error" });
     } finally {
       setIngesting(false);
     }
   }
 
-  return (
-    <div className="shell">
-      <Nav email={email} role={role} current="workbench" />
-      <main className="main">
-        <div className="page-head">
-          <h1>Workbench</h1>
-          <p>Index your documents, then ask — answered locally from your own sources, every exchange logged.</p>
-        </div>
+  const current = turns[selected];
+  const redactedChunks = current?.sources.map((s, i) => ({ s, i })).filter(({ s }) => (s.redactions ?? 0) > 0) ?? [];
 
-        <div className="grid">
-        {/* Ingest */}
-        <div className="card">
-          <h2>Knowledge</h2>
-          <div className="sub">Index a document. It stays on this box — embedded locally, stored in your own vector store.</div>
-          <form onSubmit={ingest}>
+  return (
+    <>
+      <div className="top-row">
+        <div>
+          <div className="eyebrow">Ask · answered from your documents</div>
+          <h1>Workbench</h1>
+        </div>
+        {isAdmin && (
+          <div className="tools">
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => setShowIngest((v) => !v)}
+              aria-expanded={showIngest}
+              aria-controls="ingest-panel"
+            >
+              {showIngest ? <X aria-hidden /> : <FilePlus2 aria-hidden />}
+              {showIngest ? "Close" : "Add document"}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {isAdmin && showIngest && (
+        <form id="ingest-panel" className="tile ingest" onSubmit={ingest} aria-labelledby="ingest-title">
+          <div>
+            <h2 id="ingest-title">Add a document</h2>
+            <div className="muted" style={{ fontSize: 13 }}>
+              Screened for prompt injection, PII redacted, then embedded by the local model and stored in the local vector store.
+            </div>
+          </div>
+          <div className="ingest-grid">
             <div className="field">
-              <label>Upload a file (PDF, TXT, MD, CSV)</label>
+              <label className="label" htmlFor="ingest-file">File (PDF, TXT, MD, CSV, JSON · max 5 MB)</label>
               <input
+                key={fileKey}
+                id="ingest-file"
                 className="input"
                 type="file"
-                accept=".pdf,.txt,.md,.csv,.json,application/pdf,text/plain"
+                accept=".pdf,.txt,.md,.csv,.json,application/pdf,text/plain,text/markdown,text/csv,application/json"
                 onChange={(e) => {
                   const f = e.target.files?.[0] ?? null;
                   setFile(f);
@@ -140,58 +214,152 @@ export default function Workbench({ email, role }: { email: string; role: "admin
               />
             </div>
             <div className="field">
-              <label>Source name</label>
-              <input className="input" value={srcName} onChange={(e) => setSrcName(e.target.value)} placeholder="e.g. AML-Policy-2026.pdf" />
+              <label className="label" htmlFor="ingest-name">Source name</label>
+              <input id="ingest-name" className="input" value={srcName} onChange={(e) => setSrcName(e.target.value)} placeholder="e.g. AML-Policy-2026.pdf" />
             </div>
             <div className="field">
-              <label>Who can retrieve this</label>
-              <select className="input" value={visibility} onChange={(e) => setVisibility(e.target.value as "all" | "admin")}>
+              <label className="label" htmlFor="ingest-vis">Who can retrieve it</label>
+              <select id="ingest-vis" className="input" value={visibility} onChange={(e) => setVisibility(e.target.value as "all" | "admin")}>
                 <option value="all">All users</option>
                 <option value="admin">Admins only</option>
               </select>
             </div>
-            <div className="field">
-              <label>{file ? "Document text (a file is selected — text ignored)" : "…or paste document text"}</label>
-              <textarea className="textarea" value={srcText} onChange={(e) => setSrcText(e.target.value)} placeholder="Paste the document contents to index…" style={{ minHeight: 140 }} disabled={!!file} />
-            </div>
-            <button className="btn btn-primary" type="submit" disabled={ingesting} style={{ width: "100%" }}>
-              {ingesting ? "Indexing…" : file ? "Index file" : "Index document"}
-            </button>
-            {ingestMsg && <div className="muted" style={{ marginTop: 10 }}>{ingestMsg}</div>}
-          </form>
-        </div>
-
-        {/* Chat */}
-        <div className="card">
-          <h2>Ask your documents</h2>
-          <div className="sub">Answers come only from your indexed documents, with sources. Every exchange is logged.</div>
-          <div className="chat-log">
-            {log.length === 0 && <div className="muted">Index a document, then ask a question about it.</div>}
-            {log.map((m, i) => (
-              <div key={i} className={`msg ${m.role}`}>
-                {m.text || (m.role === "ai" ? <span className="muted">Thinking…</span> : null)}
-                {m.role === "ai" && m.cites && m.cites.length > 0 && (
-                  <div className="cites">
-                    <div className="lbl">Sources</div>
-                    {m.cites.map((c, j) => (
-                      <div className="cite" key={j}>
-                        <b>{c.sourceName ?? "source"}</b>{c.chunk != null ? ` · chunk ${c.chunk}` : ""}
-                        {c.snippet ? ` — ${c.snippet.slice(0, 160)}…` : ""}
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {m.role === "ai" && m.text && <div className="audit-note"><span className="dot" /> logged to the audit trail</div>}
-              </div>
-            ))}
           </div>
-          <form className="ask-row" onSubmit={ask}>
-            <input className="input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Ask a question about your documents…" />
-            <button className="btn btn-primary" type="submit" disabled={asking}>Ask</button>
+          <div className="field">
+            <label className="label" htmlFor="ingest-text">{file ? "Pasted text (ignored while a file is selected)" : "…or paste the text"}</label>
+            <textarea id="ingest-text" className="input" rows={4} value={srcText} onChange={(e) => setSrcText(e.target.value)} disabled={!!file} placeholder="Paste document text to index" />
+          </div>
+          <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            <button className="btn btn-primary" type="submit" disabled={ingesting || (!file && !srcText.trim())}>
+              {ingesting ? "Indexing…" : "Index document"}
+            </button>
+            {ingestResult && (
+              <div className={`banner ${ingestResult.tone === "ok" ? "ok" : ingestResult.tone === "warn" ? "warn" : "bad"}`} role="status" style={{ flex: 1, minWidth: 240 }}>
+                <span>{ingestResult.text}</span>
+              </div>
+            )}
+          </div>
+        </form>
+      )}
+
+      <div className="wgrid">
+        <section className="tile thread" aria-label="Conversation">
+          {turns.length === 0 && (
+            <div className="empty" style={{ textAlign: "left", padding: "4px 0" }}>
+              <b>Ask a question about your indexed documents</b>
+              Answers come from the local model, cite the passages they used, and are written to the audit chain.
+              {isAdmin ? " Use Add document to index a file first." : ""}
+            </div>
+          )}
+          {turns.map((t, ti) => (
+            <Fragment key={ti}>
+              <div className="msg me">
+                <div className="bubble">{t.question}</div>
+              </div>
+              <div className="msg">
+                <div className="ai-av" aria-hidden>AI</div>
+                <div className="bubble" aria-live={ti === turns.length - 1 ? "polite" : undefined}>
+                  {t.answer || (!t.done && !t.error ? <span className="typing" aria-label="Generating"><i /><i /><i /></span> : null)}
+                  {t.error && <div style={{ color: "var(--red)", marginTop: t.answer ? 8 : 0 }}>{t.error}</div>}
+                  {t.sources.length > 0 && (
+                    <div className="cites">
+                      {t.sources.map((s, i) => (
+                        <a key={i} className="cite" href={`#chunk-${ti}-${i}`} onClick={() => setSelected(ti)} title={cite(s)}>
+                          [{i + 1}] {cite(s)}
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+              {t.done && !t.error && (
+                <div className="meta">
+                  <span>Model <b>{model}</b></span>
+                  <span>{t.sources.length} source{t.sources.length === 1 ? "" : "s"}</span>
+                  {t.auditHash && (
+                    <span>Audit entry <b title={t.auditHash}>{t.auditHash.slice(0, 12)}</b></span>
+                  )}
+                  {turns.length > 1 && selected !== ti && t.sources.length > 0 && (
+                    <button type="button" className="link-btn" onClick={() => setSelected(ti)}>Show chunks</button>
+                  )}
+                </div>
+              )}
+            </Fragment>
+          ))}
+          <form className="ask" onSubmit={ask}>
+            <input
+              ref={questionRef}
+              className="input"
+              type="text"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Ask a question about your documents"
+              aria-label="Question"
+              maxLength={4000}
+            />
+            <button className="btn btn-primary" type="submit" disabled={asking || !q.trim()}>
+              {asking ? "Asking…" : "Ask"}
+            </button>
           </form>
-        </div>
-        </div>
-      </main>
-    </div>
+        </section>
+
+        <section className="tile chunks" aria-labelledby="chunks-title">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div>
+              <h2 id="chunks-title">Retrieved chunks</h2>
+              <div className="muted" style={{ fontSize: 13 }}>hybrid rerank · vector + lexical overlap</div>
+            </div>
+            <span className="badge b-teal">local only</span>
+          </div>
+          {!current || current.sources.length === 0 ? (
+            <div className="empty">
+              {current && current.done
+                ? "No passages matched. The answer above says so instead of guessing."
+                : "The passages behind each answer appear here, with document name and chunk id."}
+            </div>
+          ) : (
+            <>
+              {current.sources.map((s, i) => (
+                <div className="chunk-target" id={`chunk-${selected}-${i}`} key={i}>
+                  <pre className="code wrap" tabIndex={0} aria-label={`Source ${i + 1}: ${cite(s)}`}>
+                    <span className="c"># [{i + 1}]{typeof s.score === "number" ? ` score ${s.score.toFixed(2)}` : ""}</span>
+                    {"\n"}<span className="k">doc</span>   <span className="s">{s.sourceName ?? "source"}</span>
+                    {"\n"}<span className="k">chunk</span> {s.chunk ?? "?"}
+                    {"\n"}{withMarkers(s.snippet ?? "")}{(s.snippet?.length ?? 0) >= 300 ? "…" : ""}
+                  </pre>
+                </div>
+              ))}
+              {current.done && (
+                <>
+                  {redactedChunks.length > 0 ? (
+                    <div className="banner ok">
+                      <span aria-hidden>✓</span>
+                      <span>
+                        <b>PII masked at ingest.</b>{" "}
+                        {redactedChunks
+                          .map(({ s, i }) => `[${i + 1}] chunk ${s.chunk ?? "?"} had ${s.redactions} value${s.redactions === 1 ? "" : "s"} replaced`)
+                          .join("; ")}
+                        . They were replaced before the text was embedded, so the model never saw them.
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="banner info">
+                      <span>No PII markers in these chunks.</span>
+                    </div>
+                  )}
+                  {current.piiRedacted > 0 && (
+                    <div className="banner warn">
+                      <span>
+                        <b>{current.piiRedacted} value{current.piiRedacted === 1 ? "" : "s"} redacted from the answer</b> before it left the server.
+                      </span>
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </section>
+      </div>
+    </>
   );
 }

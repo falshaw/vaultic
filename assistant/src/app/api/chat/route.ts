@@ -5,6 +5,7 @@ import { hybridRerank } from "@/lib/rerank";
 import { generateStream, GEN_MODEL } from "@/lib/ollama";
 import { appendAudit } from "@/lib/audit";
 import { createStreamRedactor } from "@/lib/pii";
+import { countRedactions } from "@/lib/metrics";
 
 export const dynamic = "force-dynamic";
 
@@ -52,6 +53,8 @@ export async function POST(req: Request) {
     chunk: h.payload?.chunk,
     score: h.rerankScore,
     snippet: (h.text ?? "").slice(0, 300),
+    // PII values the ingest redactor replaced in this chunk (the model never saw them).
+    redactions: countRedactions(h.text ?? ""),
   }));
 
   const userId = session.userId;
@@ -66,16 +69,16 @@ export async function POST(req: Request) {
       // render citations immediately.
       send({ type: "sources", sources });
 
+      // Append to the audit chain before "done" so the UI can show the entry hash.
       const audit = (answer: string) =>
-        appendAudit({ userId, userEmail, question, answer, sources, model: GEN_MODEL, collection: COLLECTION }).catch(
-          () => {},
-        );
+        appendAudit({ userId, userEmail, question, answer, sources, model: GEN_MODEL, collection: COLLECTION })
+          .then((row) => row.entryHash)
+          .catch(() => null);
 
       if (hits.length === 0) {
         send({ type: "token", text: NO_DOCS });
-        send({ type: "done", piiRedacted: 0 });
+        send({ type: "done", piiRedacted: 0, model: GEN_MODEL, auditHash: await audit(NO_DOCS) });
         controller.close();
-        await audit(NO_DOCS);
         return;
       }
 
@@ -103,9 +106,8 @@ export async function POST(req: Request) {
       // Final flush: emit the redacted remainder; audit-log the FULL redacted answer.
       const { delta: tail, full, piiRedacted } = redactor.flush();
       if (tail) send({ type: "token", text: tail });
-      send({ type: "done", piiRedacted });
+      send({ type: "done", piiRedacted, model: GEN_MODEL, auditHash: await audit(full) });
       controller.close();
-      await audit(full);
     },
   });
 

@@ -1,22 +1,23 @@
-import type { Metadata } from "next";
-import { Space_Grotesk, Hanken_Grotesk, JetBrains_Mono } from "next/font/google";
+import type { Metadata, Viewport } from "next";
+import { THEME_INIT_SCRIPT } from "@/components/ThemeToggle";
 import "./globals.css";
 
-// Self-hosted at build time (no runtime Google fetch — fits the zero-egress story).
-// Deliberately NOT Inter: Space Grotesk (display) + Hanken Grotesk (body) + mono.
-const display = Space_Grotesk({ subsets: ["latin"], weight: ["500", "600", "700"], variable: "--f-display" });
-const body = Hanken_Grotesk({ subsets: ["latin"], weight: ["400", "500", "600", "700"], variable: "--f-body" });
-const mono = JetBrains_Mono({ subsets: ["latin"], weight: ["400", "500", "600"], variable: "--f-mono" });
-
 export const metadata: Metadata = {
-  title: "Vaultic — Private AI over your own documents",
-  description: "A private AI assistant over your own documents, running entirely on your own infrastructure. Cited answers, immutable audit log, zero data egress.",
+  title: { default: "Vaultic", template: "%s · Vaultic" },
+  description:
+    "Private AI assistant over your own documents. Local model, cited answers, hash-chained audit log.",
   robots: { index: false, follow: false },
 };
 
+export const viewport: Viewport = { width: "device-width", initialScale: 1 };
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${display.variable} ${body.variable} ${mono.variable}`}>
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        {/* Sets data-theme before first paint (no light/dark flash). */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+      </head>
       <body>{children}</body>
     </html>
   );

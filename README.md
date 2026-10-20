@@ -42,7 +42,8 @@ The bridge image installs no cloud-LLM CLI and mounts no credentials, so there i
 - **Egress containment** - the Security page lists every configured endpoint classified as internal/external and generates default-deny host firewall rules (iptables / nftables) that enforce it.
 - **Supply-chain evidence** - a CycloneDX SBOM is generated at image build time and served (admin-only) alongside an evidence summary.
 - **Login protection** - Postgres-backed per-IP rate limit (fail-open) and per-account lockout after 5 failures (fail-closed).
-- **Overview dashboard** - queries per day, security posture, threats blocked, most-cited sources and recent activity, all computed from real rows.
+- **Overview dashboard** - queries per day (last 7 days), documents indexed, threats blocked, PII redactions, audit-chain status, red-team and egress results, most-cited sources and recent activity, all computed from real rows. Non-admin users see only their own questions and documents visible to all.
+- **Light and dark theme** - follows the OS setting until you pick one in the sidebar; fonts are self-hosted, so the UI makes no external requests.
 
 ## Tech stack
 
@@ -65,7 +66,7 @@ docker compose up -d --build
 docker compose logs -f vaultic-models   # first run: downloads the models, then exits
 ```
 
-Open http://127.0.0.1:3029 and log in with `VAULTIC_ADMIN_EMAIL` / `VAULTIC_ADMIN_PASSWORD` (the admin user is created on the first login while the user table is empty). In the **Workbench**, upload one of the files in `demo-docs/` and ask a question about it, for example "How many hours does the firm have to submit the initial notification of a major ICT incident?".
+Open http://127.0.0.1:3029 and log in with `VAULTIC_ADMIN_EMAIL` / `VAULTIC_ADMIN_PASSWORD` (the admin user is created on the first login while the user table is empty). In the **Workbench**, click **Add document**, upload one of the files in `demo-docs/` and ask a question about it, for example "How many hours does the firm have to submit the initial notification of a major ICT incident?".
 
 Stop with `docker compose down` (add `-v` to delete documents, audit log and models).
 
@@ -116,8 +117,7 @@ The assistant also reads `OLLAMA_TIMEOUT_MS` (default 300000) and `OLLAMA_KEEP_A
 
 ## Demo data
 
-- `demo-docs/` contains three synthetic policy documents (DORA ICT risk management, DORA incident reporting, AML/CFT) for a fictional firm. Upload them in the Workbench to try ingest, cited answers and audit entries.
-- `POST /api/seed-demo` (admin-only, idempotent) loads a 14-day backdated dataset with a valid hash-chained audit log so the Overview dashboard has data.
+`demo-docs/` contains three synthetic policy documents (DORA ICT risk management, DORA incident reporting, AML/CFT) for a fictional firm. Upload them in the Workbench to try ingest, cited answers and audit entries. The Overview starts empty and fills from real use; there is no sample dataset.
 
 ## Local development
 
@@ -125,7 +125,8 @@ The assistant also reads `OLLAMA_TIMEOUT_MS` (default 300000) and `OLLAMA_KEEP_A
 cd assistant
 npm install            # also runs prisma generate
 npm run typecheck
-npm test               # vitest: PII redaction + chunking
+npm run lint
+npm test               # vitest: PII redaction, chunking, dashboard metrics
 npm run build
 npm run db:push        # needs DATABASE_URL pointing at a Postgres instance
 npm run dev            # http://localhost:3029
@@ -139,6 +140,7 @@ npm run dev            # http://localhost:3029
 
 - `pii.test.ts`: email, IBAN (spaced and contiguous), Luhn-valid card, US SSN and phone redaction; no false positives on dates and section numbers; the streaming redactor never emits part of a PII value split across model tokens.
 - `chunk.test.ts`: the bridge's sentence-window chunker (`bridge/chunk.mjs`): size limit, sentence-boundary cuts, overlap, no lost text, no empty chunks.
+- `metrics.test.ts`: the Overview's 7-day buckets, redaction-marker counts, most-cited sources and the per-role scoping (a non-admin never sees other users' questions or admin-only documents).
 
 ## Container hardening
 
