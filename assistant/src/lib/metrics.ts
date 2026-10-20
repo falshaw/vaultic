@@ -1,208 +1,176 @@
 import { prisma } from "./prisma";
-import { verifyChain } from "./audit";
+import { verifyChain, type ChainStatus } from "./audit";
 import { runRedTeam } from "./redteam";
 import { getEgressManifest } from "./egress";
 
-// All dashboard numbers are derived from REAL rows in Postgres (audit log +
-// documents) + the live security checks. Nothing here is fabricated; a fresh
-// install shows low/zero values until the demo seed or real use populates it.
+// Every Overview number is computed from rows in Postgres (audit log + documents)
+// or from the live checks (chain verification, red-team self-test, egress
+// manifest). A fresh install shows zeros and empty states, not sample data.
 
-const DAYS = 14;
+const WEEK = 7;
 
-export interface Kpi {
-  label: string;
+export interface DayBar {
+  key: string; // YYYY-MM-DD (UTC)
+  label: string; // Mon, Tue, ...
   value: number;
-  display: string;
-  deltaPct: number | null; // last 7d vs prior 7d
-  spark: number[];
-  tone: "gold" | "emerald" | "red";
-}
-export interface Ring {
-  label: string;
-  pct: number;
-  caption: string;
+  today: boolean;
 }
 export interface BarItem {
   label: string;
   value: number;
 }
+export type ActivityKind = "query" | "indexed" | "quarantined" | "security";
 export interface Activity {
   at: Date;
-  kind: "query" | "indexed" | "quarantined";
-  actor: string;
+  kind: ActivityKind;
+  title: string;
   detail: string;
 }
 export interface Dashboard {
-  kpis: Kpi[];
-  series: { label: string; value: number }[];
-  rings: Ring[];
-  threats: BarItem[];
+  week: DayBar[];
+  weekTotal: number;
+  queries: number;
+  indexed: number;
+  quarantined: number;
+  piiRedactions: number;
+  chain: ChainStatus;
+  redteam: { passed: number; total: number };
+  egress: { internal: number; total: number; airGap: boolean };
   sources: BarItem[];
   activity: Activity[];
-  airGap: boolean;
-  generatedAt: string;
 }
 
-function dayKey(d: Date): string {
-  return d.toISOString().slice(0, 10);
-}
-function lastNDays(n: number): string[] {
-  const out: string[] = [];
-  const today = new Date();
-  for (let i = n - 1; i >= 0; i--) {
-    const d = new Date(today);
-    d.setUTCDate(today.getUTCDate() - i);
-    out.push(dayKey(d));
+const dayKey = (d: Date) => d.toISOString().slice(0, 10);
+const WEEKDAY = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** Count of timestamps per UTC day for the last 7 days, oldest first, today last. */
+export function weekBars(dates: Date[], now = new Date()): DayBar[] {
+  const days: DayBar[] = [];
+  for (let i = WEEK - 1; i >= 0; i--) {
+    const d = new Date(now);
+    d.setUTCDate(now.getUTCDate() - i);
+    days.push({ key: dayKey(d), label: WEEKDAY[d.getUTCDay()], value: 0, today: i === 0 });
   }
-  return out;
-}
-function pctChange(curr: number, prev: number): number | null {
-  if (prev === 0) return curr > 0 ? 100 : null;
-  return Math.round(((curr - prev) / prev) * 1000) / 10;
+  const idx = new Map(days.map((d, i) => [d.key, i]));
+  for (const t of dates) {
+    const i = idx.get(dayKey(t));
+    if (i !== undefined) days[i].value++;
+  }
+  return days;
 }
 
-export async function getDashboard(): Promise<Dashboard> {
-  const [audit, docs] = await Promise.all([
+/** Number of `[REDACTED:...]` markers the ingest redactor left in a text. */
+export function countRedactions(text: string): number {
+  return (text.match(/\[REDACTED:[A-Z-]+\]/g) ?? []).length;
+}
+
+/** Most-cited source names across audit entries, highest first. */
+export function topSources(entries: { sources: unknown }[], limit = 5): BarItem[] {
+  const counts = new Map<string, number>();
+  for (const e of entries) {
+    if (!Array.isArray(e.sources)) continue;
+    // Count each document once per answer, even when several of its chunks were cited.
+    const names = new Set<string>();
+    for (const s of e.sources as { sourceName?: unknown }[]) {
+      if (s && typeof s.sourceName === "string") names.add(s.sourceName);
+    }
+    for (const n of names) counts.set(n, (counts.get(n) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([label, value]) => ({ label, value }))
+    .sort((a, b) => b.value - a.value || a.label.localeCompare(b.label))
+    .slice(0, limit);
+}
+
+export interface Viewer {
+  userId: string;
+  role: "admin" | "user";
+}
+
+/**
+ * What a viewer may see on the Overview. Admins see everything. A non-admin sees
+ * only their own questions and only documents marked visible to all users, so
+ * admin-only document names, other users' questions and security events (which
+ * carry the targeted email) never reach them.
+ */
+export function scopeForViewer<
+  A extends { userId: string | null; collection: string },
+  D extends { visibility: string },
+>(viewer: Viewer, audit: A[], docs: D[]): { audit: A[]; docs: D[] } {
+  if (viewer.role === "admin") return { audit, docs };
+  return {
+    audit: audit.filter((a) => a.collection !== "security" && a.userId === viewer.userId),
+    docs: docs.filter((d) => d.visibility === "all"),
+  };
+}
+
+export async function getDashboard(viewer: Viewer): Promise<Dashboard> {
+  const [allAudit, allDocs, chain] = await Promise.all([
     prisma.auditLog.findMany({ orderBy: { createdAt: "asc" } }),
     prisma.document.findMany({ orderBy: { createdAt: "asc" } }),
+    verifyChain(),
   ]);
+  const { audit, docs } = scopeForViewer(viewer, allAudit, allDocs);
 
-  // Q&A-only view of the audit log: security events (e.g. login lockouts) are
-  // appended to the same tamper-evident chain but must not inflate the "query"
-  // metrics. They remain visible in the full /audit trail.
+  // Security events (login lockouts) share the tamper-evident chain but are not
+  // questions, so they stay out of the query counts.
   const qa = audit.filter((a) => a.collection !== "security");
+  const week = weekBars(qa.map((a) => a.createdAt));
 
-  const days = lastNDays(DAYS);
-  const idx = new Map(days.map((d, i) => [d, i]));
-
-  const qByDay = new Array(DAYS).fill(0);
-  for (const a of qa) {
-    const i = idx.get(dayKey(a.createdAt));
-    if (i !== undefined) qByDay[i]++;
-  }
-  const docByDay = new Array(DAYS).fill(0);
-  const piiByDay = new Array(DAYS).fill(0);
-  const threatByDay = new Array(DAYS).fill(0);
-  for (const d of docs) {
-    const i = idx.get(dayKey(d.createdAt));
-    if (i === undefined) continue;
-    docByDay[i]++;
-    piiByDay[i] += d.piiRedactions;
-    if (d.quarantined) threatByDay[i]++;
-  }
-  const cumulative = (arr: number[], base: number) => {
-    let run = base;
-    return arr.map((v) => (run += v));
-  };
-
-  const sum7 = (arr: number[], end: number) => arr.slice(Math.max(0, end - 7), end).reduce((a, b) => a + b, 0);
-  const docsBefore = docs.length - docByDay.reduce((a, b) => a + b, 0);
-
-  const totalQueries = qa.length;
-  const indexedDocs = docs.filter((d) => !d.quarantined).length;
-  const quarantined = docs.filter((d) => d.quarantined).length;
-  const piiTotal = docs.reduce((a, d) => a + d.piiRedactions, 0);
-
-  const kpis: Kpi[] = [
-    {
-      label: "Queries",
-      value: totalQueries,
-      display: totalQueries.toLocaleString(),
-      deltaPct: pctChange(sum7(qByDay, DAYS), sum7(qByDay, DAYS - 7)),
-      spark: qByDay,
-      tone: "gold",
-    },
-    {
-      label: "Documents indexed",
-      value: indexedDocs,
-      display: indexedDocs.toLocaleString(),
-      deltaPct: pctChange(sum7(docByDay, DAYS), sum7(docByDay, DAYS - 7)),
-      spark: cumulative(docByDay, docsBefore),
-      tone: "emerald",
-    },
-    {
-      label: "Threats blocked",
-      value: quarantined,
-      display: quarantined.toLocaleString(),
-      deltaPct: pctChange(sum7(threatByDay, DAYS), sum7(threatByDay, DAYS - 7)),
-      spark: threatByDay,
-      tone: "red",
-    },
-    {
-      label: "PII redactions",
-      value: piiTotal,
-      display: piiTotal.toLocaleString(),
-      deltaPct: pctChange(sum7(piiByDay, DAYS), sum7(piiByDay, DAYS - 7)),
-      spark: piiByDay,
-      tone: "emerald",
-    },
-  ];
-
-  const series = days.map((d, i) => ({ label: d.slice(5), value: qByDay[i] }));
-
-  // Rings — live security posture.
-  const chain = await verifyChain();
   const redteam = runRedTeam();
   const egress = getEgressManifest();
-  const internalPct =
-    egress.endpoints.length === 0
-      ? 100
-      : Math.round((egress.endpoints.filter((e) => e.scope === "internal").length / egress.endpoints.length) * 100);
-  const rings: Ring[] = [
-    { label: "Audit chain", pct: chain.ok ? 100 : 0, caption: chain.ok ? `${chain.entries} entries intact` : "chain broken" },
-    { label: "Red-team", pct: redteam.score, caption: `${redteam.passed}/${redteam.total} caught` },
-    { label: "Egress blocked", pct: internalPct, caption: `${egress.endpoints.length}/${egress.endpoints.length} internal` },
-  ];
 
-  // Threats breakdown — aggregate injection-finding rules across quarantined docs + PII.
-  const ruleCounts = new Map<string, number>();
-  for (const d of docs) {
-    if (!Array.isArray(d.injectionFindings)) continue;
-    for (const f of d.injectionFindings as { rule?: string }[]) {
-      if (f?.rule) ruleCounts.set(f.rule, (ruleCounts.get(f.rule) ?? 0) + 1);
-    }
-  }
-  if (piiTotal > 0) ruleCounts.set("pii-redaction", piiTotal);
-  const threats: BarItem[] = [...ruleCounts.entries()]
-    .map(([label, value]) => ({ label: label.replace(/-/g, " "), value }))
-    .sort((a, b) => b.value - a.value)
-    .slice(0, 6);
-
-  // Top sources — most-cited documents across answered queries.
-  const srcCounts = new Map<string, number>();
-  for (const a of qa) {
-    if (!Array.isArray(a.sources)) continue;
-    for (const s of a.sources as { sourceName?: string }[]) {
-      const n = s?.sourceName;
-      if (n) srcCounts.set(n, (srcCounts.get(n) ?? 0) + 1);
-    }
-  }
-  const sources: BarItem[] = [...srcCounts.entries()]
-    .map(([label, value]) => ({ label, value }))
-    .sort((a, b) => b.value - a.value)
-    .slice(0, 6);
-
-  // Activity feed — merge recent queries + document events.
-  const events: Activity[] = [
-    ...qa.map((a) => ({ at: a.createdAt, kind: "query" as const, actor: a.userEmail, detail: a.question })),
-    ...docs.map((d) => ({
-      at: d.createdAt,
-      kind: d.quarantined ? ("quarantined" as const) : ("indexed" as const),
-      actor: "ingest",
-      detail: d.sourceName,
-    })),
+  const activity: Activity[] = [
+    ...audit.map((a): Activity => {
+      if (a.collection === "security") {
+        return { at: a.createdAt, kind: "security", title: a.question.replace(/^\[security\]\s*/, ""), detail: a.userEmail };
+      }
+      const n = Array.isArray(a.sources) ? a.sources.length : 0;
+      return {
+        at: a.createdAt,
+        kind: "query",
+        title: a.question,
+        detail: `${a.userEmail} · ${n} source${n === 1 ? "" : "s"} cited`,
+      };
+    }),
+    ...docs.map((d): Activity => {
+      if (d.quarantined) {
+        const rules = Array.isArray(d.injectionFindings)
+          ? [...new Set((d.injectionFindings as { rule?: string }[]).map((f) => f?.rule).filter(Boolean))]
+          : [];
+        return {
+          at: d.createdAt,
+          kind: "quarantined",
+          title: d.sourceName,
+          detail: rules.length ? `ingest · matched ${rules.join(", ")}` : "ingest · quarantined",
+        };
+      }
+      return {
+        at: d.createdAt,
+        kind: "indexed",
+        title: d.sourceName,
+        detail: `ingest · ${d.chunks} chunk${d.chunks === 1 ? "" : "s"} · ${d.piiRedactions} PII redacted`,
+      };
+    }),
   ]
     .sort((a, b) => b.at.getTime() - a.at.getTime())
-    .slice(0, 8);
+    .slice(0, 6);
 
   return {
-    kpis,
-    series,
-    rings,
-    threats,
-    sources,
-    activity: events,
-    airGap: egress.airGapCompatible,
-    generatedAt: new Date().toISOString(),
+    week,
+    weekTotal: week.reduce((s, d) => s + d.value, 0),
+    queries: qa.length,
+    indexed: docs.filter((d) => !d.quarantined).length,
+    quarantined: docs.filter((d) => d.quarantined).length,
+    piiRedactions: docs.reduce((s, d) => s + d.piiRedactions, 0),
+    chain,
+    redteam: { passed: redteam.passed, total: redteam.total },
+    egress: {
+      internal: egress.endpoints.length - egress.externalCount,
+      total: egress.endpoints.length,
+      airGap: egress.airGapCompatible,
+    },
+    sources: topSources(qa),
+    activity,
   };
 }

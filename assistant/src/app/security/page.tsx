@@ -1,10 +1,12 @@
 import { redirect } from "next/navigation";
+import { Download } from "lucide-react";
 import { getSession } from "@/lib/auth";
 import { getEgressManifest } from "@/lib/egress";
-import Nav from "@/components/Nav";
+import Shell from "@/components/Shell";
 import RedTeam from "@/components/RedTeam";
 
 export const dynamic = "force-dynamic";
+export const metadata = { title: "Security" };
 
 export default async function SecurityPage() {
   const session = await getSession();
@@ -15,67 +17,80 @@ export default async function SecurityPage() {
   const internal = m.endpoints.length - m.externalCount;
 
   return (
-    <div className="shell">
-      <Nav email={session.email} role={session.role} current="security" />
-      <main className="main">
-        <div className="page-head">
-          <h1>Containment &amp; egress</h1>
-          <p>Vaultic&rsquo;s answer path talks only to services on its own box. Apply the firewall pack to enforce default-deny egress — then &ldquo;data never leaves&rdquo; is provable, not a claim.</p>
+    <Shell email={session.email} role={session.role}>
+      <div className="top-row">
+        <div>
+          <div className="eyebrow">Admin · containment</div>
+          <h1>Security</h1>
+          <p>
+            The endpoints the answer path is configured to call, a firewall pack that enforces default-deny egress, the
+            build-time SBOM, and a self-test of the injection and PII guards.
+          </p>
         </div>
-        <div className="metrics">
-          <div className="metric"><div className="m-label">Endpoints</div><div className="m-val">{m.endpoints.length}</div></div>
-          <div className="metric"><div className="m-label">Internal</div><div className="m-val ok">{internal}</div></div>
-          <div className="metric"><div className="m-label">External</div><div className={`m-val ${m.externalCount ? "bad" : ""}`}>{m.externalCount}</div></div>
-          <div className="metric"><div className="m-label">Egress</div><div className={`m-val ${m.airGapCompatible ? "ok" : "bad"}`}>{m.airGapCompatible ? "BLOCKED" : "OPEN"}</div></div>
-        </div>
-        <div className="card">
-          <div className="row-between">
-            <div className={`badge ${m.airGapCompatible ? "badge-ok" : "badge-bad"}`}>
-              {m.airGapCompatible
-                ? "✓ Air-gap compatible — 0 external endpoints in the answer path"
-                : `✗ ${m.externalCount} external endpoint(s) configured — review`}
-            </div>
-            <a className="btn btn-primary" href="/api/firewall-rules">Export containment pack</a>
-          </div>
+      </div>
 
-        <table className="audit-table">
-          <thead>
-            <tr><th>Service</th><th>Endpoint</th><th>Purpose</th><th>Scope</th></tr>
-          </thead>
-          <tbody>
-            {m.endpoints.map((e) => (
-              <tr key={e.name}>
-                <td>{e.name}</td>
-                <td className="nowrap">{e.host}{e.port ? `:${e.port}` : ""}</td>
-                <td>{e.purpose}</td>
-                <td>
-                  {e.scope === "internal"
-                    ? <span className="badge badge-ok">internal</span>
-                    : <span className="badge badge-bad">external</span>}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="stats">
+        <div className="stat-card"><div className="eyebrow">Endpoints</div><b>{m.endpoints.length}</b></div>
+        <div className="stat-card"><div className="eyebrow">Internal</div><b className="ok">{internal}</b></div>
+        <div className="stat-card"><div className="eyebrow">External</div><b className={m.externalCount ? "bad" : undefined}>{m.externalCount}</b></div>
+        <div className="stat-card"><div className="eyebrow">Config verdict</div><b className={m.airGapCompatible ? "ok" : "bad"}>{m.airGapCompatible ? "Internal only" : "Review"}</b></div>
+      </div>
 
-        <p className="muted" style={{ marginTop: 16, fontSize: 13 }}>
-          The pack includes ready-to-apply iptables / nftables / Windows-Firewall rules (default-deny egress for
-          Vaultic&rsquo;s Docker network) plus a one-command check that egress is actually blocked.
-        </p>
-        </div>
-
-        <div className="card">
-          <div className="row-between">
+      <div className="sec-grid">
+        <section className="tile" aria-labelledby="egress-title">
+          <div className="action-row" style={{ marginBottom: 14 }}>
             <div>
-              <h2>Software bill of materials</h2>
-              <div className="sub">A real CycloneDX SBOM of the runtime dependencies, generated at build — for supply-chain review and vendor risk.</div>
+              <h2 id="egress-title">Egress endpoints</h2>
+              <p>
+                Read from the running configuration and classified by host. This is a configuration check, not a live
+                probe: apply the containment pack to enforce it at the network layer.
+              </p>
             </div>
-            <a className="btn btn-primary" href="/api/sbom">Download SBOM (CycloneDX)</a>
+            <a className="btn btn-primary btn-sm" href="/api/firewall-rules" download>
+              <Download aria-hidden /> Containment pack
+            </a>
           </div>
-        </div>
+          <div className={`banner ${m.airGapCompatible ? "ok" : "bad"}`} style={{ marginBottom: 14 }}>
+            <span aria-hidden>{m.airGapCompatible ? "✓" : "✗"}</span>
+            <span>
+              {m.airGapCompatible
+                ? "No external endpoint on the answer path."
+                : `${m.externalCount} external endpoint${m.externalCount === 1 ? "" : "s"} configured. Review before relying on containment.`}
+            </span>
+          </div>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr><th>Service</th><th>Endpoint</th><th>Purpose</th><th>Scope</th></tr>
+              </thead>
+              <tbody>
+                {m.endpoints.map((e) => (
+                  <tr key={e.name}>
+                    <td>{e.name}</td>
+                    <td className="mono" style={{ fontSize: 12.5 }}>{e.host}{e.port ? `:${e.port}` : ""}</td>
+                    <td className="muted">{e.purpose}</td>
+                    <td>{e.scope === "internal" ? <span className="badge b-teal">internal</span> : <span className="badge b-red">external</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="tile" aria-labelledby="sbom-title">
+          <div className="action-row">
+            <div>
+              <h2 id="sbom-title">Software bill of materials</h2>
+              <p>CycloneDX SBOM of the runtime npm dependencies, generated when the image was built.</p>
+            </div>
+            <a className="btn btn-ghost btn-sm" href="/api/sbom" download>
+              <Download aria-hidden /> SBOM (CycloneDX JSON)
+            </a>
+          </div>
+        </section>
 
         <RedTeam />
-      </main>
-    </div>
+      </div>
+    </Shell>
   );
 }
