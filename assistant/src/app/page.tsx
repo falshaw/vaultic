@@ -6,7 +6,8 @@ import Shell from "@/components/Shell";
 import { PostureRings } from "@/components/PostureRings";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Overview" };
+// The root segment does not get the layout's title template, so spell it out.
+export const metadata = { title: { absolute: "Overview · Vaultic" } };
 
 const KIND: Record<ActivityKind, { pill: string; label: string; tone: string; icon: React.ReactNode }> = {
   query: { pill: "p-query", label: "Query", tone: "accent", icon: <path d="M4 4h16v12H9l-5 4z" /> },

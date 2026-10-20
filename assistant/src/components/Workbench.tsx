@@ -3,6 +3,7 @@
 import { Fragment, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { FilePlus2, X } from "lucide-react";
+import { nextSourceName } from "@/lib/source-name";
 
 interface Source {
   sourceName?: string;
@@ -49,6 +50,7 @@ export default function Workbench({ isAdmin, model }: { isAdmin: boolean; model:
   const [file, setFile] = useState<File | null>(null);
   const [fileKey, setFileKey] = useState(0);
   const [srcName, setSrcName] = useState("");
+  const [autoName, setAutoName] = useState<string | null>(null);
   const [srcText, setSrcText] = useState("");
   const [visibility, setVisibility] = useState<"all" | "admin">("all");
   const [ingesting, setIngesting] = useState(false);
@@ -145,17 +147,21 @@ export default function Workbench({ isAdmin, model }: { isAdmin: boolean; model:
       const j = await res.json().catch(() => ({}));
       if (!res.ok) {
         setIngestResult({ tone: "bad", text: j.error ?? `Ingest failed (${res.status})` });
-      } else if (j.quarantined) {
+        return;
+      }
+      if (j.quarantined) {
         setIngestResult({ tone: "bad", text: j.warning ?? "Quarantined, not indexed." });
       } else {
         const who = j.visibility === "admin" ? "admins only" : "all users";
         const pii = j.piiRedactions ? ` ${j.piiRedactions} PII value${j.piiRedactions === 1 ? "" : "s"} redacted before storage.` : "";
         setIngestResult({ tone: j.piiRedactions ? "warn" : "ok", text: `Indexed “${j.sourceName}”: ${j.chunks} chunk${j.chunks === 1 ? "" : "s"}, visible to ${who}.${pii}` });
-        setFile(null);
-        setFileKey((k) => k + 1);
-        setSrcName("");
-        setSrcText("");
       }
+      // Reset after every processed upload, indexed or quarantined.
+      setFile(null);
+      setFileKey((k) => k + 1);
+      setSrcName("");
+      setAutoName(null);
+      setSrcText("");
     } catch {
       setIngestResult({ tone: "bad", text: "Network error" });
     } finally {
@@ -209,7 +215,8 @@ export default function Workbench({ isAdmin, model }: { isAdmin: boolean; model:
                 onChange={(e) => {
                   const f = e.target.files?.[0] ?? null;
                   setFile(f);
-                  if (f && !srcName) setSrcName(f.name);
+                  setSrcName(nextSourceName(srcName, autoName, f));
+                  setAutoName(f ? f.name : null);
                 }}
               />
             </div>
