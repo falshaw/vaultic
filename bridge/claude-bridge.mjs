@@ -37,6 +37,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { chunkText as chunkTextWith } from "./chunk.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -428,30 +429,8 @@ function normalizePointId(externalId, text) {
 // Auto-chunker (sentence-window splitter)
 // =============================================================================
 
-function chunkText(text, targetChars = CHUNK_TARGET_CHARS, overlapChars = CHUNK_OVERLAP_CHARS) {
-  if (text.length <= targetChars) return [text];
-  const chunks = [];
-  let i = 0;
-  while (i < text.length) {
-    let end = Math.min(i + targetChars, text.length);
-    if (end < text.length) {
-      const lookback = 200;
-      const winStart = Math.max(end - lookback, i);
-      const window = text.slice(winStart, end);
-      // last sentence boundary in window
-      const matches = [...window.matchAll(/[.!?]\s+(?=[A-Z])/g)];
-      if (matches.length > 0) {
-        const m = matches[matches.length - 1];
-        const cut = winStart + m.index + m[0].length;
-        if (cut > i + Math.floor(targetChars / 2)) end = cut;
-      }
-    }
-    const piece = text.slice(i, end).trim();
-    if (piece) chunks.push(piece);
-    if (end >= text.length) break;
-    i = Math.max(end - overlapChars, i + 1);
-  }
-  return chunks;
+function chunkText(text) {
+  return chunkTextWith(text, CHUNK_TARGET_CHARS, CHUNK_OVERLAP_CHARS);
 }
 
 // =============================================================================

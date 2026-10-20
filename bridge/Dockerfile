@@ -17,7 +17,7 @@ RUN useradd --create-home --uid 1001 bridge \
 ENV HOME=/home/bridge
 ENV NODE_ENV=production
 
-COPY --chown=bridge:bridge claude-bridge.mjs /app/claude-bridge.mjs
+COPY --chown=bridge:bridge claude-bridge.mjs chunk.mjs /app/
 
 USER bridge
 WORKDIR /app
