@@ -77,7 +77,7 @@ Stop with `docker compose down` (add `-v` to delete documents, audit log and mod
 | `GEN_MODEL` | `qwen2.5:7b` | ~4.7 GB | answer generation |
 | `EMBED_MODEL` | `nomic-embed-text` | ~0.3 GB | document and query embeddings (768 dimensions, set `EMBED_DIM` to match another model) |
 
-On CPU, a 7B model answers in roughly 10 to 60 seconds depending on the machine. A smaller `GEN_MODEL` (for example `qwen2.5:3b`, ~1.9 GB) is faster; a larger one gives better answers. After changing a model, run `docker compose up -d` again; `vaultic-models` pulls whatever is missing. Changing `EMBED_MODEL` requires re-ingesting documents.
+On CPU, a 7B model answers in roughly 10 to 60 seconds depending on the machine and `OLLAMA_CPUS`. A smaller `GEN_MODEL` (for example `qwen2.5:3b`, ~1.9 GB) is faster; a larger one gives better answers. After changing a model, run `docker compose up -d` again; `vaultic-models` pulls whatever is missing. Changing `EMBED_MODEL` requires re-ingesting documents.
 
 ### NVIDIA GPU (optional)
 
@@ -111,6 +111,7 @@ All settings come from `.env` (see `.env.example`):
 | `OLLAMA_URL` | no | Ollama used by the assistant and bridge (default: the bundled `http://vaultic-ollama:11434`) |
 | `GEN_MODEL` | no | generation model (default `qwen2.5:7b`) |
 | `EMBED_MODEL`, `EMBED_DIM` | no | embedding model and its dimension (default `nomic-embed-text`, `768`) |
+| `OLLAMA_CPUS` | no | CPU cores for the bundled Ollama (default `6`). Sets the container limit and the thread count sent with every request; set `0` when using an external Ollama |
 | `TRUST_PROXY` | no | `true` only behind a trusted reverse proxy |
 
 The assistant also reads `OLLAMA_TIMEOUT_MS` (default 300000) and `OLLAMA_KEEP_ALIVE` (default `30m`).
