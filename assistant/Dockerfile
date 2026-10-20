@@ -6,7 +6,9 @@ RUN apk upgrade --no-cache && apk add --no-cache libc6-compat openssl
 WORKDIR /app
 
 FROM base AS deps
-COPY package.json package-lock.json ./
+# postinstall runs `prisma generate`, so the schema + config must be present.
+COPY package.json package-lock.json prisma.config.ts ./
+COPY prisma ./prisma
 RUN npm ci
 
 FROM base AS builder
