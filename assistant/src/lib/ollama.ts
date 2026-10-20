@@ -1,4 +1,5 @@
 // Local generation against the bundled Ollama. No external API — fully on-box.
+import { ollamaOptions } from "./ollama-options";
 
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://vaultic-ollama:11434";
 export const GEN_MODEL = process.env.GEN_MODEL ?? "qwen2.5:7b";
@@ -18,7 +19,7 @@ async function chatOnce(system: string, prompt: string): Promise<string> {
       model: GEN_MODEL,
       stream: false,
       keep_alive: KEEP_ALIVE,
-      options: { temperature: 0.1 },
+      options: ollamaOptions({ temperature: 0.1 }),
       messages: [
         { role: "system", content: system },
         { role: "user", content: prompt },
@@ -66,7 +67,10 @@ function recordFailure(): void {
 // A transient network failure (the connection dropping while the model loads into
 // VRAM) surfaces as "fetch failed" / ECONNRESET / a socket error — NOT an HTTP
 // status. Those are worth retrying; an HTTP error from ollama is not.
-function isTransient(e: unknown): boolean {
+// Our own GEN_TIMEOUT_MS firing is NOT transient: retrying it made a slow model
+// hold the request for 3 x 300 s before the user saw an error.
+export function isTransient(e: unknown): boolean {
+  if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) return false;
   const m = (e instanceof Error ? e.message : String(e)).toLowerCase();
   return (
     m.includes("fetch failed") ||
@@ -74,8 +78,7 @@ function isTransient(e: unknown): boolean {
     m.includes("econnreset") ||
     m.includes("und_err") ||
     m.includes("socket") ||
-    m.includes("network") ||
-    m.includes("timeout")
+    m.includes("network")
   );
 }
 
@@ -113,7 +116,7 @@ async function openChatStream(system: string, prompt: string): Promise<ReadableS
       model: GEN_MODEL,
       stream: true,
       keep_alive: KEEP_ALIVE,
-      options: { temperature: 0.1 },
+      options: ollamaOptions({ temperature: 0.1 }),
       messages: [
         { role: "system", content: system },
         { role: "user", content: prompt },

@@ -68,7 +68,9 @@ services:
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3", compress: "true" } }
     deploy:
       resources:
-        limits: { memory: 8g, cpus: "6.0", pids: 400 }
+        # OLLAMA_CPUS also sets num_thread on every request (assistant + bridge):
+        # llama.cpp otherwise starts one thread per host core and stalls under this quota.
+        limits: { memory: 8g, cpus: "${OLLAMA_CPUS:-6}", pids: 400 }
 
   # ── One-shot: pull GEN_MODEL + EMBED_MODEL into the bundled Ollama ────────
   # First run downloads ~5 GB; follow with `docker compose logs -f vaultic-models`.
@@ -134,6 +136,7 @@ services:
       - QDRANT_URL=http://vaultic-knowledge:6333
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
       - EMBED_DIM=${EMBED_DIM:-768}
+      - OLLAMA_NUM_THREAD=${OLLAMA_CPUS:-6}
     networks: [vaultic-net]
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -165,6 +168,7 @@ services:
       - OLLAMA_URL=${OLLAMA_URL:-http://vaultic-ollama:11434}
       - GEN_MODEL=${GEN_MODEL:-qwen2.5:7b}
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
+      - OLLAMA_NUM_THREAD=${OLLAMA_CPUS:-6}
       - RAG_COLLECTION=vaultic
       - VAULTIC_ADMIN_EMAIL=${VAULTIC_ADMIN_EMAIL:?set VAULTIC_ADMIN_EMAIL in .env}
       - VAULTIC_ADMIN_PASSWORD=${VAULTIC_ADMIN_PASSWORD:?set VAULTIC_ADMIN_PASSWORD in .env}

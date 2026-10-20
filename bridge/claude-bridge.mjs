@@ -624,6 +624,7 @@ async function callOllamaFallback({ prompt, system }) {
         model: OLLAMA_FALLBACK_MODEL,
         messages,
         stream: false,
+        ...(OLLAMA_OPTIONS ? { options: OLLAMA_OPTIONS } : {}),
       }),
       signal: AbortSignal.timeout(SPAWN_TIMEOUT_MS),
     });
@@ -657,11 +658,16 @@ function resolveCollectionName(name) {
   return name;
 }
 
+// Match llama.cpp's thread pool to the bundled Ollama's CPU quota (see
+// assistant/src/lib/ollama-options.ts); unset or 0 lets Ollama decide.
+const OLLAMA_NUM_THREAD = Number.parseInt(process.env.OLLAMA_NUM_THREAD ?? "", 10);
+const OLLAMA_OPTIONS = OLLAMA_NUM_THREAD > 0 ? { num_thread: OLLAMA_NUM_THREAD } : null;
+
 async function getEmbedding(text) {
   const res = await fetch(`${OLLAMA_URL}/api/embed`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: EMBED_MODEL, input: text }),
+    body: JSON.stringify({ model: EMBED_MODEL, input: text, ...(OLLAMA_OPTIONS ? { options: OLLAMA_OPTIONS } : {}) }),
     signal: AbortSignal.timeout(30_000),
   });
   if (!res.ok) {
