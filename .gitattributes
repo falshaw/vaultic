@@ -1,0 +1,21 @@
+# Normalise line endings so shell scripts work in Linux containers even when
+# the repo is cloned on Windows (CRLF breaks "#!/bin/bash" shebangs).
+* text=auto eol=lf
+
+*.sh text eol=lf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.xlsx binary
+*.xls binary
+*.zip binary
+*.gz binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
