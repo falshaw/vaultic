@@ -8,6 +8,7 @@ import { nextSourceName } from "@/lib/source-name";
 interface Source {
   sourceName?: string;
   chunk?: number;
+  chunkOf?: number;
   score?: number;
   snippet?: string;
   redactions?: number;
@@ -37,7 +38,7 @@ function withMarkers(text: string) {
 }
 
 function cite(s: Source) {
-  return `${s.sourceName ?? "source"}${s.chunk != null ? ` · chunk ${s.chunk}` : ""}`;
+  return `${s.sourceName ?? "source"}${s.chunk != null ? ` · chunk ${s.chunk}${s.chunkOf ? `/${s.chunkOf}` : ""}` : ""}`;
 }
 
 export default function Workbench({ isAdmin, model }: { isAdmin: boolean; model: string }) {
@@ -331,8 +332,8 @@ export default function Workbench({ isAdmin, model }: { isAdmin: boolean; model:
                   <pre className="code wrap" tabIndex={0} aria-label={`Source ${i + 1}: ${cite(s)}`}>
                     <span className="c"># [{i + 1}]{typeof s.score === "number" ? ` score ${s.score.toFixed(2)}` : ""}</span>
                     {"\n"}<span className="k">doc</span>   <span className="s">{s.sourceName ?? "source"}</span>
-                    {"\n"}<span className="k">chunk</span> {s.chunk ?? "?"}
-                    {"\n"}{withMarkers(s.snippet ?? "")}{(s.snippet?.length ?? 0) >= 300 ? "…" : ""}
+                    {"\n"}<span className="k">chunk</span> {s.chunk != null ? `${s.chunk}${s.chunkOf ? ` of ${s.chunkOf}` : ""}` : "n/a"}
+                    {"\n"}…{withMarkers(s.snippet ?? "")}…
                   </pre>
                 </div>
               ))}
@@ -344,7 +345,7 @@ export default function Workbench({ isAdmin, model }: { isAdmin: boolean; model:
                       <span>
                         <b>PII masked at ingest.</b>{" "}
                         {redactedChunks
-                          .map(({ s, i }) => `[${i + 1}] chunk ${s.chunk ?? "?"} had ${s.redactions} value${s.redactions === 1 ? "" : "s"} replaced`)
+                          .map(({ s, i }) => `[${i + 1}] ${s.sourceName ?? "source"} chunk ${s.chunk ?? "n/a"} had ${s.redactions} value${s.redactions === 1 ? "" : "s"} replaced`)
                           .join("; ")}
                         . They were replaced before the text was embedded, so the model never saw them.
                       </span>
