@@ -6,6 +6,7 @@ import { generateStream, GEN_MODEL } from "@/lib/ollama";
 import { appendAudit } from "@/lib/audit";
 import { createStreamRedactor } from "@/lib/pii";
 import { countRedactions } from "@/lib/metrics";
+import { bestSnippet, chunkPosition } from "@/lib/snippet";
 
 export const dynamic = "force-dynamic";
 
@@ -50,9 +51,10 @@ export async function POST(req: Request) {
   const hits = hybridRerank(question, rawHits, FINAL_K);
   const sources = hits.map((h) => ({
     sourceName: h.payload?.sourceName ?? "source",
-    chunk: h.payload?.chunk,
+    ...chunkPosition(h.payload),
     score: h.rerankScore,
-    snippet: (h.text ?? "").slice(0, 300),
+    // The 300-char window that best matches the question (chunks are ~2000 chars).
+    snippet: bestSnippet(h.text ?? "", question, 300),
     // PII values the ingest redactor replaced in this chunk (the model never saw them).
     redactions: countRedactions(h.text ?? ""),
   }));
