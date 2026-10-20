@@ -8,7 +8,7 @@ Vaultic is aimed at organisations that cannot send internal documents to a cloud
 
 ## Architecture
 
-One `docker compose up` starts five containers on a private bridge network. Only the assistant publishes a port, and only on `127.0.0.1`.
+One `docker compose up` starts five services on a private bridge network (plus a one-shot model download). Only the assistant publishes a port, and only on `127.0.0.1`.
 
 ```
 documents -> ingest -> extract -> injection scan -> PII redaction -> chunk + embed -> Qdrant
@@ -20,11 +20,14 @@ user -> assistant (Next.js) --> bridge /rag/search --> Ollama embeddings --> Qdr
 
 | Service | Image / build | Role | Host port |
 | --- | --- | --- | --- |
-| `vaultic-assistant` | `assistant/` (Next.js 16) | UI, auth, ingest, chat, audit/RBAC/evidence | `127.0.0.1:3029` |
+| `vaultic-assistant` | `assistant/` (Next.js 16) | UI, auth, ingest, chat, audit/RBAC/evidence | `127.0.0.1:${VAULTIC_PORT}` (default 3029) |
 | `vaultic-bridge` | `bridge/` (Node) | RAG gateway: `/rag/*` (Ollama embeddings -> Qdrant), `/health`, `/metrics` | internal |
 | `vaultic-knowledge` | `qdrant/qdrant` | vector store for your documents | internal |
-| `vaultic-ollama` | `ollama/ollama` | local generation and embedding models | internal |
+| `vaultic-ollama` | `ollama/ollama` | local generation and embedding models (CPU by default) | internal |
+| `vaultic-models` | `ollama/ollama` | one-shot: pulls `GEN_MODEL` and `EMBED_MODEL` into `vaultic-ollama` | none |
 | `vaultic-postgres` | `postgres:16-alpine` | users, documents, audit log, login throttling | internal |
+
+There are no fixed container or volume names, so `docker compose -p <name>` keeps several copies apart.
 
 The bridge image installs no cloud-LLM CLI and mounts no credentials, so there is no external-API code path in the deployed stack.
 
@@ -47,18 +50,51 @@ Next.js 16, React 19, TypeScript, Prisma 7 (`@prisma/adapter-pg`), PostgreSQL 16
 
 ## Quick start
 
-Requirements: Docker with Compose v2. The compose file reserves an NVIDIA GPU for Ollama; on a machine without one, remove the `reservations` block under `vaultic-ollama` and it runs on CPU.
+Requirements: Docker with Compose v2.20 or newer (Docker Desktop on Windows/macOS, Docker Engine + compose plugin on Linux), about 7 GB of free disk for the models, and about 8 GB of RAM available to Docker for CPU inference. The commands are the same in PowerShell and bash.
 
 ```bash
-cp .env.example .env            # set POSTGRES_PASSWORD, JWT_SECRET, admin credentials
-docker compose up -d --build
-
-# first run only: pull the models into the bundled Ollama
-docker compose exec vaultic-ollama ollama pull qwen2.5:7b
-docker compose exec vaultic-ollama ollama pull nomic-embed-text
+git clone <this repo> vaultic
+cd vaultic
+cp .env.example .env          # PowerShell: Copy-Item .env.example .env
 ```
 
-Open http://127.0.0.1:3029 and log in with `VAULTIC_ADMIN_EMAIL` / `VAULTIC_ADMIN_PASSWORD` (the admin user is created on first login when the user table is empty). Upload documents in the **Workbench** and ask questions there.
+Edit `.env`: set `POSTGRES_PASSWORD` (letters and digits), `JWT_SECRET` (32+ random characters; `.env.example` shows how to generate one on each OS) and `VAULTIC_ADMIN_EMAIL` / `VAULTIC_ADMIN_PASSWORD`. Change `VAULTIC_PORT` if 3029 is taken.
+
+```bash
+docker compose up -d --build
+docker compose logs -f vaultic-models   # first run: downloads the models, then exits
+```
+
+Open http://127.0.0.1:3029 and log in with `VAULTIC_ADMIN_EMAIL` / `VAULTIC_ADMIN_PASSWORD` (the admin user is created on the first login while the user table is empty). In the **Workbench**, upload one of the files in `demo-docs/` and ask a question about it, for example "How many hours does the firm have to submit the initial notification of a major ICT incident?".
+
+Stop with `docker compose down` (add `-v` to delete documents, audit log and models).
+
+### Models
+
+| Setting | Default | Size | Used for |
+| --- | --- | --- | --- |
+| `GEN_MODEL` | `qwen2.5:7b` | ~4.7 GB | answer generation |
+| `EMBED_MODEL` | `nomic-embed-text` | ~0.3 GB | document and query embeddings (768 dimensions, set `EMBED_DIM` to match another model) |
+
+On CPU, a 7B model answers in roughly 10 to 60 seconds depending on the machine. A smaller `GEN_MODEL` (for example `qwen2.5:3b`, ~1.9 GB) is faster; a larger one gives better answers. After changing a model, run `docker compose up -d` again; `vaultic-models` pulls whatever is missing. Changing `EMBED_MODEL` requires re-ingesting documents.
+
+### NVIDIA GPU (optional)
+
+The default is CPU so the stack runs on any machine. With an NVIDIA GPU and the NVIDIA Container Toolkit (Linux) or Docker Desktop's WSL2 GPU support (Windows), add the GPU override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+```
+
+### Use an existing Ollama instead of the bundled one
+
+If Ollama already runs on the host or elsewhere, skip the bundled container: in `.env`, delete the `COMPOSE_PROFILES=ollama` line and set
+
+```bash
+OLLAMA_URL=http://host.docker.internal:11434   # Ollama on the Docker host
+```
+
+Pull both models there first (`ollama pull qwen2.5:7b`, `ollama pull nomic-embed-text`) or set `GEN_MODEL` / `EMBED_MODEL` to models it already has. On Linux, Ollama must listen on more than `127.0.0.1` for containers to reach it (`OLLAMA_HOST=0.0.0.0` in its service environment). Note that the answer path then leaves the compose network for that Ollama instance; the Security page lists it as an endpoint.
 
 ## Configuration
 
@@ -69,8 +105,11 @@ All settings come from `.env` (see `.env.example`):
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | yes | database credentials |
 | `JWT_SECRET` | yes | session signing key, min. 32 chars; obvious placeholders are rejected |
 | `VAULTIC_ADMIN_EMAIL`, `VAULTIC_ADMIN_PASSWORD` | yes | first admin account |
+| `VAULTIC_PORT` | no | host port on 127.0.0.1 (default `3029`) |
+| `COMPOSE_PROFILES` | no | `ollama` (default in `.env.example`) starts the bundled Ollama and model download |
+| `OLLAMA_URL` | no | Ollama used by the assistant and bridge (default: the bundled `http://vaultic-ollama:11434`) |
 | `GEN_MODEL` | no | generation model (default `qwen2.5:7b`) |
-| `EMBED_MODEL` | no | embedding model (default `nomic-embed-text`, 768-dim) |
+| `EMBED_MODEL`, `EMBED_DIM` | no | embedding model and its dimension (default `nomic-embed-text`, `768`) |
 | `TRUST_PROXY` | no | `true` only behind a trusted reverse proxy |
 
 The assistant also reads `OLLAMA_TIMEOUT_MS` (default 300000) and `OLLAMA_KEEP_ALIVE` (default `30m`).
@@ -84,13 +123,22 @@ The assistant also reads `OLLAMA_TIMEOUT_MS` (default 300000) and `OLLAMA_KEEP_A
 
 ```bash
 cd assistant
-npm install
+npm install            # also runs prisma generate
+npm run typecheck
+npm test               # vitest: PII redaction + chunking
+npm run build
 npm run db:push        # needs DATABASE_URL pointing at a Postgres instance
 npm run dev            # http://localhost:3029
-npm run typecheck
 ```
 
 `BRIDGE_URL` and `OLLAMA_URL` must point at a running bridge and Ollama for chat and ingest to work.
+
+## Tests
+
+`assistant/src/test/` holds a vitest suite (`npm test` in `assistant/`):
+
+- `pii.test.ts`: email, IBAN (spaced and contiguous), Luhn-valid card, US SSN and phone redaction; no false positives on dates and section numbers; the streaming redactor never emits part of a PII value split across model tokens.
+- `chunk.test.ts`: the bridge's sentence-window chunker (`bridge/chunk.mjs`): size limit, sentence-boundary cuts, overlap, no lost text, no empty chunks.
 
 ## Container hardening
 
