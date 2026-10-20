@@ -1,6 +1,14 @@
 # Vaultic — private AI over your own documents, fully local. One `docker compose up`.
 # Only the assistant publishes a host port; every other service is internal to the
-# vaultic-net network. Zero data egress by construction.
+# vaultic-net network.
+#
+# Defaults: CPU-only Ollama bundled in the stack (profile "ollama", enabled by
+# COMPOSE_PROFILES=ollama in .env). Options:
+#   - NVIDIA GPU:       docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#   - existing Ollama:  remove COMPOSE_PROFILES from .env and set OLLAMA_URL
+#
+# No container_name / fixed volume names: `docker compose -p <name>` namespaces
+# containers, network and volumes, so several copies can run side by side.
 #
 # Hardening: cap_drop ALL, no-new-privileges, read-only roots + tmpfs, 127.0.0.1-only binds,
 # resource + pid caps, health-gated depends_on, fail-fast ${VAR:?} secrets.
@@ -9,13 +17,12 @@ services:
   # ── Audit log + users (RBAC) + document metadata ──────────────────────────
   vaultic-postgres:
     image: postgres:16.15-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
-    container_name: vaultic-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
     volumes:
-      - vaultic_pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
     networks: [vaultic-net]
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
@@ -33,12 +40,14 @@ services:
       resources:
         limits: { memory: 512m, cpus: "1.0", pids: 200 }
 
-  # ── Local model serving (generation + embeddings) ─────────────────────────
+  # ── Local model serving (generation + embeddings), CPU by default ─────────
+  # GPU: add docker-compose.gpu.yml (see README). Not started when the "ollama"
+  # profile is disabled and OLLAMA_URL points at an existing Ollama instead.
   vaultic-ollama:
     image: ollama/ollama:0.32.14@sha256:9d30908e41144b1f1da89b9d8e33c07e4aeb43ff41a8660241b1686e2cc330ad
-    container_name: vaultic-ollama
+    profiles: [ollama]
     volumes:
-      - vaultic_ollama_models:/root/.ollama
+      - ollama_models:/root/.ollama
     networks: [vaultic-net]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -48,8 +57,6 @@ services:
     tmpfs:
       - /tmp:mode=1777,size=2g
       - /var/tmp:mode=1777,size=1g
-    # GPU is optional. To use an NVIDIA GPU, uncomment the deploy.resources.reservations
-    # block below and ensure the nvidia container runtime is installed. CPU works for v0.
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 30s
@@ -62,15 +69,36 @@ services:
     deploy:
       resources:
         limits: { memory: 8g, cpus: "6.0", pids: 400 }
-        reservations:
-          devices: [{ driver: nvidia, count: 1, capabilities: [gpu] }]
+
+  # ── One-shot: pull GEN_MODEL + EMBED_MODEL into the bundled Ollama ────────
+  # First run downloads ~5 GB; follow with `docker compose logs -f vaultic-models`.
+  # Re-running is cheap (already-present models are skipped).
+  vaultic-models:
+    image: ollama/ollama:0.32.14@sha256:9d30908e41144b1f1da89b9d8e33c07e4aeb43ff41a8660241b1686e2cc330ad
+    profiles: [ollama]
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["ollama pull \"$$GEN_MODEL\" && ollama pull \"$$EMBED_MODEL\" && ollama list"]
+    environment:
+      - OLLAMA_HOST=http://vaultic-ollama:11434
+      - GEN_MODEL=${GEN_MODEL:-qwen2.5:7b}
+      - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
+    networks: [vaultic-net]
+    depends_on:
+      vaultic-ollama: { condition: service_healthy }
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+      - /root/.ollama:size=16m
+    restart: "no"
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
 
   # ── Private vector store (your documents) ─────────────────────────────────
   vaultic-knowledge:
     image: qdrant/qdrant:v1.19.0@sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc
-    container_name: vaultic-knowledge
     volumes:
-      - vaultic_qdrant:/qdrant/storage
+      - qdrant:/qdrant/storage
     networks: [vaultic-net]
     environment:
       - QDRANT__SERVICE__HTTP_PORT=6333
@@ -95,22 +123,22 @@ services:
       resources:
         limits: { memory: 1g, cpus: "1.0", pids: 200 }
 
-  # ── LLM gateway + RAG (/rag/* → Ollama embeddings → Qdrant). Ollama-only. ──
+  # ── RAG gateway (/rag/* → Ollama embeddings → Qdrant). Ollama-only. ───────
   vaultic-bridge:
     build: ./bridge
-    image: vaultic-bridge:latest
-    container_name: vaultic-bridge
     environment:
       - CLAUDE_BRIDGE_HOST=0.0.0.0
       - CLAUDE_BRIDGE_PORT=7777
-      - OLLAMA_URL=http://vaultic-ollama:11434
+      - OLLAMA_URL=${OLLAMA_URL:-http://vaultic-ollama:11434}
       - OLLAMA_FALLBACK_MODEL=${GEN_MODEL:-qwen2.5:7b}
       - QDRANT_URL=http://vaultic-knowledge:6333
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
-      - EMBED_DIM=768
+      - EMBED_DIM=${EMBED_DIM:-768}
     networks: [vaultic-net]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
-      vaultic-ollama: { condition: service_healthy }
+      vaultic-ollama: { condition: service_healthy, required: false }
       vaultic-knowledge: { condition: service_healthy }
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -130,21 +158,23 @@ services:
   # ── The assistant: UI + auth + ingest + the audit/RBAC/evidence layer ─────
   vaultic-assistant:
     build: ./assistant
-    image: vaultic-assistant:latest
-    container_name: vaultic-assistant
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@vaultic-postgres:5432/${POSTGRES_DB}
       - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET in .env}
       - BRIDGE_URL=http://vaultic-bridge:7777
-      - OLLAMA_URL=http://vaultic-ollama:11434
+      - OLLAMA_URL=${OLLAMA_URL:-http://vaultic-ollama:11434}
       - GEN_MODEL=${GEN_MODEL:-qwen2.5:7b}
+      - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
       - RAG_COLLECTION=vaultic
       - VAULTIC_ADMIN_EMAIL=${VAULTIC_ADMIN_EMAIL:?set VAULTIC_ADMIN_EMAIL in .env}
       - VAULTIC_ADMIN_PASSWORD=${VAULTIC_ADMIN_PASSWORD:?set VAULTIC_ADMIN_PASSWORD in .env}
+      - TRUST_PROXY=${TRUST_PROXY:-false}
       - NODE_ENV=production
     ports:
-      - "127.0.0.1:3029:3000"
+      - "127.0.0.1:${VAULTIC_PORT:-3029}:3000"
     networks: [vaultic-net]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       vaultic-postgres: { condition: service_healthy }
       vaultic-bridge: { condition: service_healthy }
@@ -172,9 +202,6 @@ networks:
     driver: bridge
 
 volumes:
-  vaultic_pgdata:
-    name: vaultic_pgdata
-  vaultic_ollama_models:
-    name: vaultic_ollama_models
-  vaultic_qdrant:
-    name: vaultic_qdrant
+  pgdata:
+  ollama_models:
+  qdrant:

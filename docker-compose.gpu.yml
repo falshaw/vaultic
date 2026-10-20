@@ -1,0 +1,13 @@
+# Optional NVIDIA GPU for the bundled Ollama. Requires the NVIDIA driver and the
+# NVIDIA Container Toolkit (Linux) or Docker Desktop with WSL2 GPU support (Windows).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+services:
+  vaultic-ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
