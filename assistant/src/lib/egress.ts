@@ -86,14 +86,15 @@ ${verdict}
 ${manifestRows}
 
 Every endpoint above is on the Vaultic Docker network (vaultic-net). The only
-host-published port is the assistant on 127.0.0.1:3029 (loopback only — not
-reachable from the LAN). No service in the answer path calls a public address.
+host-published port is the assistant on 127.0.0.1 (VAULTIC_PORT, default 3029;
+loopback only — not reachable from the LAN). No service in the answer path calls a public address.
 
 ## Enforce: default-deny egress (Linux Docker host)
 
 First discover the Vaultic network's subnet:
 
-    docker network inspect vaultic-net -f "{{(index .IPAM.Config 0).Subnet}}"
+    # Compose prefixes the network with the project name (e.g. vaultic_vaultic-net)
+    docker network inspect -f "{{(index .IPAM.Config 0).Subnet}}" "$(docker network ls -q --filter name=_vaultic-net | head -n1)"
     # e.g. 172.20.0.0/16  -> use as VAULTIC_SUBNET below
 
 ### iptables (filter container traffic via the DOCKER-USER chain)
