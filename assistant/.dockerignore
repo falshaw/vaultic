@@ -6,3 +6,4 @@ out
 .git
 *.log
 npm-debug.log*
+src/test
