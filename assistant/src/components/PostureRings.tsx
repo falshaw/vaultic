@@ -27,8 +27,8 @@ export function PostureRings({
   return (
     <div className="posture">
       <svg
-        width="150"
-        height="150"
+        width="136"
+        height="136"
         viewBox="0 0 150 150"
         role="img"
         aria-label={`Audit chain ${center.toLowerCase()}, ${sub}. Red-team ${redteam.passed} of ${redteam.total} caught.`}
