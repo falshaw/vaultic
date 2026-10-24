@@ -3,17 +3,22 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
-/** Per-row controls on the Documents page: who can retrieve it, and delete. */
+/**
+ * Per-row controls on the Documents page: `part="access"` is who can retrieve
+ * it (the Access column), `part="delete"` removes it (the Actions column).
+ */
 export default function DocumentActions({
   id,
   name,
   visibility,
   quarantined,
+  part,
 }: {
   id: string;
   name: string;
   visibility: string;
   quarantined: boolean;
+  part: "access" | "delete";
 }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
@@ -41,7 +46,7 @@ export default function DocumentActions({
   return (
     <div style={{ display: "grid", gap: 6, justifyItems: "start" }}>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-        {!quarantined && (
+        {part === "access" && !quarantined && (
           <select
             className="input"
             style={{ width: "auto", padding: "4px 8px", fontSize: 12.5 }}
@@ -60,7 +65,8 @@ export default function DocumentActions({
             <option value="admin">Admins only</option>
           </select>
         )}
-        {confirming ? (
+        {part === "access" && quarantined && <span className="faint">not indexed</span>}
+        {part === "delete" && (confirming ? (
           <>
             <button
               type="button"
@@ -85,7 +91,7 @@ export default function DocumentActions({
           >
             Delete
           </button>
-        )}
+        ))}
       </div>
       {confirming && !busy && (
         <span className="faint" style={{ fontSize: 11.5 }}>

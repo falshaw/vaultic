@@ -77,7 +77,7 @@ export default async function DocumentsPage() {
                     <td className="when">{fmt(d.createdAt)}</td>
                     <td><span className="src">{d.sourceName}</span></td>
                     <td>
-                      {d.visibility === "admin" ? <span className="badge b-amber">admins only</span> : <span className="badge b-blue">all users</span>}
+                      <DocumentActions part="access" id={d.id} name={d.sourceName} visibility={d.visibility} quarantined={d.quarantined} />
                     </td>
                     <td className="num">{d.chunks}</td>
                     <td className="num">{d.piiRedactions}</td>
@@ -92,7 +92,7 @@ export default async function DocumentsPage() {
                       )}
                     </td>
                     <td>
-                      <DocumentActions id={d.id} name={d.sourceName} visibility={d.visibility} quarantined={d.quarantined} />
+                      <DocumentActions part="delete" id={d.id} name={d.sourceName} visibility={d.visibility} quarantined={d.quarantined} />
                     </td>
                   </tr>
                 );
