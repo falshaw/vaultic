@@ -52,6 +52,14 @@ describe("topSources", () => {
       { label: "a.md", value: 1 },
     ]);
   });
+
+  it("ignores passages that were retrieved but not cited", () => {
+    const entries = [
+      { sources: [{ sourceName: "policy.md", cited: true }, { sourceName: "aml.md", cited: false }] },
+      { sources: [{ sourceName: "aml.md", cited: false }] },
+    ];
+    expect(topSources(entries)).toEqual([{ label: "policy.md", value: 1 }]);
+  });
 });
 
 describe("scopeForViewer", () => {
@@ -60,19 +68,21 @@ describe("scopeForViewer", () => {
     { id: 2, userId: "u1", collection: "vaultic" },
     { id: 3, userId: "u2", collection: "vaultic" },
     { id: 4, userId: "u1", collection: "security" },
+    { id: 5, userId: "u1", collection: "admin" },
   ];
   const docs = [
-    { id: "d1", visibility: "all" },
-    { id: "d2", visibility: "admin" },
+    { id: "d1", visibility: "all", quarantined: false },
+    { id: "d2", visibility: "admin", quarantined: false },
+    { id: "d3", visibility: "all", quarantined: true },
   ];
 
   it("gives admins everything", () => {
     const s = scopeForViewer({ userId: "admin", role: "admin" }, audit, docs);
-    expect(s.audit).toHaveLength(4);
-    expect(s.docs).toHaveLength(2);
+    expect(s.audit).toHaveLength(5);
+    expect(s.docs).toHaveLength(3);
   });
 
-  it("limits a user to their own questions and documents visible to all", () => {
+  it("limits a user to their own questions and indexed documents visible to all", () => {
     const s = scopeForViewer({ userId: "u1", role: "user" }, audit, docs);
     expect(s.audit.map((a) => a.id)).toEqual([2]);
     expect(s.docs.map((d) => d.id)).toEqual(["d1"]);

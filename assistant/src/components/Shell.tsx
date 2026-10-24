@@ -3,7 +3,7 @@
 import { useState, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { FileText, LayoutGrid, Link2, LogOut, Menu, MessageSquareText, ShieldCheck, X, type LucideIcon } from "lucide-react";
+import { FileText, LayoutGrid, Link2, LogOut, Menu, MessageSquareText, ShieldCheck, Users, X, type LucideIcon } from "lucide-react";
 import { AppBackground, LogoMark, WordMark } from "@/components/AppBackground";
 import { ThemeToggle } from "@/components/ThemeToggle";
 
@@ -21,6 +21,7 @@ const MAIN: NavItem[] = [
 // Admin-only pages: the server pages also redirect non-admins, this only hides the links.
 const ADMIN: NavItem[] = [
   { href: "/documents", label: "Documents", icon: FileText },
+  { href: "/users", label: "Users", icon: Users },
   { href: "/audit", label: "Audit", icon: Link2 },
   { href: "/security", label: "Security", icon: ShieldCheck },
 ];

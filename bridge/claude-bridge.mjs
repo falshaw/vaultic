@@ -21,6 +21,8 @@
  *   POST   /rag/upsert-batch  → body { collection, items: [{id?, text, payload?}], chunk? }
  *   POST   /rag/search        → body { collection, query, topK?, filter? }
  *   DELETE /rag/:collection/:id → delete a single point
+ *   POST   /rag/delete-by-filter → body { collection, filter } (filter.must required)
+ *   POST   /rag/set-payload  → body { collection, filter, payload } (merge keys)
  *   GET    /rag/collections   → list collections (with embed model metadata)
  *   POST   /admin/reload      → reload allowlist + state from disk
  *
@@ -1240,6 +1242,43 @@ async function handleRagUpsertBatch(req, res, ctx) {
   }
 }
 
+// Points selected by a Qdrant payload filter (e.g. every chunk of one
+// document): POST /rag/delete-by-filter { collection, filter } removes them,
+// POST /rag/set-payload { collection, filter, payload } merges keys into them.
+async function handleRagByFilter(req, res, ctx, action) {
+  const body = await parseJsonBody(req, res, ctx.requestId);
+  if (body === null) return;
+  const { collection: collName, filter, payload } = body;
+  if (!isValidCollectionName(collName)) {
+    return send(res, 400, { ok: false, error: "invalid collection name" }, ctx.requestId);
+  }
+  // A missing or empty filter would match the whole collection.
+  if (!filter || typeof filter !== "object" || !Array.isArray(filter.must) || filter.must.length === 0) {
+    return send(res, 400, { ok: false, error: "filter.must with at least one condition is required" }, ctx.requestId);
+  }
+  if (action === "set-payload" && (!payload || typeof payload !== "object")) {
+    return send(res, 400, { ok: false, error: "payload object is required" }, ctx.requestId);
+  }
+  const collection = resolveCollectionName(collName);
+  const base = `/collections/${encodeURIComponent(collection)}/points`;
+  try {
+    const counted = await qdrantRequest("POST", `${base}/count`, { filter, exact: true });
+    const count = counted?.result?.count ?? 0;
+    if (count > 0) {
+      if (action === "delete") await qdrantRequest("POST", `${base}/delete?wait=true`, { filter });
+      else await qdrantRequest("POST", `${base}/payload?wait=true`, { payload, filter });
+    }
+    log("info", `rag.${action}`, { requestId: ctx.requestId, app: ctx.appName, collection, count });
+    return send(res, 200, { ok: true, collection, count }, ctx.requestId);
+  } catch (err) {
+    const msg = err.message || String(err);
+    // A collection that does not exist yet has nothing to change.
+    if (/HTTP 404/.test(msg)) return send(res, 200, { ok: true, collection, count: 0 }, ctx.requestId);
+    log("warn", `rag.${action}.failed`, { requestId: ctx.requestId, app: ctx.appName, collection, error: msg });
+    return send(res, 500, { ok: false, error: msg }, ctx.requestId);
+  }
+}
+
 async function handleRagSearch(req, res, ctx) {
   const body = await parseJsonBody(req, res, ctx.requestId);
   if (body === null) return;
@@ -1665,6 +1704,16 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && req.url === "/rag/search") {
       await handleRagSearch(req, res, ctx);
+      status = res.statusCode;
+      return;
+    }
+    if (req.method === "POST" && req.url === "/rag/delete-by-filter") {
+      await handleRagByFilter(req, res, ctx, "delete");
+      status = res.statusCode;
+      return;
+    }
+    if (req.method === "POST" && req.url === "/rag/set-payload") {
+      await handleRagByFilter(req, res, ctx, "set-payload");
       status = res.statusCode;
       return;
     }

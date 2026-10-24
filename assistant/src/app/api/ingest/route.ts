@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { getSession } from "@/lib/auth";
@@ -6,6 +7,7 @@ import { ragUpsert } from "@/lib/bridge";
 import { extractFromFile } from "@/lib/extract";
 import { redactPii, totalPii } from "@/lib/pii";
 import { scanForInjection, shouldQuarantine } from "@/lib/guard";
+import { auditAdminEvent } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
@@ -66,28 +68,57 @@ export async function POST(req: Request) {
   const { text: clean, hits } = redactPii(text);
   const piiCount = totalPii(hits);
 
+  // 3) The same content is indexed once: a re-upload names the existing document.
+  const contentHash = createHash("sha256").update(clean).digest("hex");
+  if (!quarantined) {
+    const existing = await prisma.document.findFirst({
+      where: { collection: COLLECTION, contentHash, quarantined: false },
+      select: { sourceName: true },
+    });
+    if (existing) {
+      return Response.json(
+        { error: `Already indexed as "${existing.sourceName}". Delete that document first to index it again.` },
+        { status: 409 },
+      );
+    }
+  }
+
+  // The row comes first so its id can go into every chunk's payload: delete and
+  // visibility changes then address exactly this document's points.
+  const doc = await prisma.document.create({
+    data: {
+      collection: COLLECTION,
+      sourceName,
+      chunks: 0,
+      ingestedById: session.userId,
+      quarantined,
+      visibility,
+      piiRedactions: piiCount,
+      contentHash,
+      injectionFindings: findings.length ? (findings as unknown as Prisma.InputJsonValue) : undefined,
+    },
+  });
+
   let chunks = 0;
   if (!quarantined) {
     // Store visibility in the Qdrant payload so retrieval can filter by role.
-    const r = await ragUpsert(COLLECTION, clean, { sourceName, visibility });
-    if (!r.ok) return Response.json({ error: r.error ?? "ingest failed" }, { status: 502 });
+    const r = await ragUpsert(COLLECTION, clean, { sourceName, visibility, documentId: doc.id });
+    if (!r.ok) {
+      await prisma.document.delete({ where: { id: doc.id } }).catch(() => {});
+      return Response.json({ error: r.error ?? "ingest failed" }, { status: 502 });
+    }
     chunks = r.chunks ?? 0;
+    await prisma.document.update({ where: { id: doc.id }, data: { chunks } });
   }
 
-  await prisma.document
-    .create({
-      data: {
-        collection: COLLECTION,
-        sourceName,
-        chunks,
-        ingestedById: session.userId,
-        quarantined,
-        visibility,
-        piiRedactions: piiCount,
-        injectionFindings: findings.length ? (findings as unknown as Prisma.InputJsonValue) : undefined,
-      },
-    })
-    .catch(() => {});
+  await auditAdminEvent(
+    { userId: session.userId, email: session.email },
+    quarantined ? "document quarantined" : "document indexed",
+    quarantined
+      ? `"${sourceName}" was not indexed: possible prompt injection (${findings.map((f) => f.rule).join(", ")}).`
+      : `"${sourceName}" indexed: ${chunks} chunk${chunks === 1 ? "" : "s"}, visible to ${visibility === "all" ? "all users" : "admins only"}, ${piiCount} PII value${piiCount === 1 ? "" : "s"} redacted.`,
+    { event: quarantined ? "document_quarantined" : "document_indexed", documentId: doc.id, sourceName, visibility, chunks, piiRedactions: piiCount, contentHash },
+  );
 
   return Response.json({
     ok: !quarantined,

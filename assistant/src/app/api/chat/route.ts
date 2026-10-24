@@ -7,6 +7,7 @@ import { appendAudit } from "@/lib/audit";
 import { createStreamRedactor } from "@/lib/pii";
 import { countRedactions } from "@/lib/metrics";
 import { bestSnippet, chunkPosition } from "@/lib/snippet";
+import { citedNumbers, relevantHits } from "@/lib/citations";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +18,9 @@ const schema = z.object({ question: z.string().min(1).max(4000) });
 
 const NO_DOCS =
   "I don't have any indexed documents that cover that. Index a relevant document first, then ask again.";
+// Audit answers for questions that did not get one: never the partial text.
+const FAILED = "[generation failed] The model did not finish (error or timeout). No answer was given.";
+const CANCELLED = "[cancelled] The browser left before the answer finished. Generation was stopped.";
 
 const SYSTEM =
   'You are a careful assistant for a regulated organisation. Answer the user\'s question using ONLY the provided sources. If the sources do not contain the answer, reply exactly: "The indexed documents don\'t contain that." Never use outside knowledge and never invent facts. Cite the sources you used as [1], [2].';
@@ -48,7 +52,8 @@ export async function POST(req: Request) {
       { status: 503 },
     );
   }
-  const hits = hybridRerank(question, rawHits, FINAL_K);
+  // Rerank, then drop passages far below the best one: they are not sources.
+  const hits = relevantHits(hybridRerank(question, rawHits, FINAL_K));
   const sources = hits.map((h) => ({
     sourceName: h.payload?.sourceName ?? "source",
     ...chunkPosition(h.payload),
@@ -62,25 +67,56 @@ export async function POST(req: Request) {
   const userId = session.userId;
   const userEmail = session.email;
 
+  // Closing the tab (or a client abort) stops the model instead of letting a
+  // CPU generation run to the end for nobody.
+  const stop = new AbortController();
+  req.signal.addEventListener("abort", () => stop.abort(), { once: true });
+
   const stream = new ReadableStream<Uint8Array>({
+    cancel() {
+      stop.abort();
+    },
     async start(controller) {
       const enc = new TextEncoder();
-      const send = (obj: unknown) => controller.enqueue(enc.encode(JSON.stringify(obj) + "\n"));
+      const send = (obj: unknown) => {
+        if (stop.signal.aborted) return;
+        try {
+          controller.enqueue(enc.encode(JSON.stringify(obj) + "\n"));
+        } catch {
+          stop.abort(); // the stream is closed: the client is gone
+        }
+      };
+      const close = () => {
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
+      };
 
       // Sources are known before generation — send them first so the UI can
       // render citations immediately.
       send({ type: "sources", sources });
 
       // Append to the audit chain before "done" so the UI can show the entry hash.
-      const audit = (answer: string) =>
-        appendAudit({ userId, userEmail, question, answer, sources, model: GEN_MODEL, collection: COLLECTION })
+      // Each source records whether the answer cited it.
+      const audit = (answer: string, cited: number[]) =>
+        appendAudit({
+          userId,
+          userEmail,
+          question,
+          answer,
+          sources: sources.map((s, i) => ({ ...s, cited: cited.includes(i + 1) })),
+          model: GEN_MODEL,
+          collection: COLLECTION,
+        })
           .then((row) => row.entryHash)
           .catch(() => null);
 
       if (hits.length === 0) {
         send({ type: "token", text: NO_DOCS });
-        send({ type: "done", piiRedacted: 0, model: GEN_MODEL, auditHash: await audit(NO_DOCS) });
-        controller.close();
+        send({ type: "done", piiRedacted: 0, model: GEN_MODEL, cited: [], auditHash: await audit(NO_DOCS, []) });
+        close();
         return;
       }
 
@@ -93,23 +129,37 @@ export async function POST(req: Request) {
       // text up to a boundary no PII token can straddle, so PII matched by the
       // patterns can never reach the client mid-stream (see createStreamRedactor).
       const redactor = createStreamRedactor();
+      let failed = false;
       try {
-        for await (const delta of generateStream(SYSTEM, prompt)) {
+        for await (const delta of generateStream(SYSTEM, prompt, stop.signal)) {
           const safe = redactor.push(delta);
           if (safe) send({ type: "token", text: safe });
         }
       } catch (e) {
+        failed = true;
         // Don't echo the raw error to the client — it can contain prompt/context
         // fragments and bypasses the redactor. Log detail server-side only.
-        console.error("vaultic chat generation error:", e);
+        if (!stop.signal.aborted) console.error("vaultic chat generation error:", e);
+      }
+
+      if (stop.signal.aborted) {
+        await audit(CANCELLED, []);
+        close();
+        return;
+      }
+      if (failed) {
         send({ type: "error", error: "Generation failed. Please try again." });
+        send({ type: "done", piiRedacted: 0, model: GEN_MODEL, cited: [], auditHash: await audit(FAILED, []) });
+        close();
+        return;
       }
 
       // Final flush: emit the redacted remainder; audit-log the FULL redacted answer.
       const { delta: tail, full, piiRedacted } = redactor.flush();
       if (tail) send({ type: "token", text: tail });
-      send({ type: "done", piiRedacted, model: GEN_MODEL, auditHash: await audit(full) });
-      controller.close();
+      const cited = citedNumbers(full, sources.length);
+      send({ type: "done", piiRedacted, model: GEN_MODEL, cited, auditHash: await audit(full, cited) });
+      close();
     },
   });
 

@@ -140,3 +140,27 @@ export async function verifyChain(): Promise<ChainStatus> {
   }
   return { ok: true, entries };
 }
+
+/** Audit collections that are not questions: kept out of query counts and the Q&A view. */
+export const EVENT_COLLECTIONS = ["security", "admin"];
+
+/**
+ * Record an admin action (upload, quarantine, delete, visibility, user change)
+ * in the same tamper-evident chain. Never fails the action it records.
+ */
+export async function auditAdminEvent(
+  actor: { userId: string; email: string },
+  title: string,
+  detail: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  await appendAudit({
+    userId: actor.userId,
+    userEmail: actor.email,
+    question: `[admin] ${title}`,
+    answer: detail,
+    sources: [data],
+    model: "—",
+    collection: "admin",
+  }).catch(() => {});
+}

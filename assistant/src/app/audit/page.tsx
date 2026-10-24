@@ -2,7 +2,7 @@ import { redirect } from "next/navigation";
 import { Download } from "lucide-react";
 import { getSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { verifyChain } from "@/lib/audit";
+import { EVENT_COLLECTIONS, verifyChain } from "@/lib/audit";
 import Shell from "@/components/Shell";
 
 export const dynamic = "force-dynamic";
@@ -26,10 +26,13 @@ export default async function AuditPage() {
     prisma.auditLog.count(),
     verifyChain(),
   ]);
+  // Documents an answer actually cited (entries written before the cited flag count every source).
   const sources = new Set<string>();
   for (const r of rows) {
-    if (!Array.isArray(r.sources)) continue;
-    for (const s of r.sources as { sourceName?: string }[]) if (s?.sourceName) sources.add(s.sourceName);
+    if (EVENT_COLLECTIONS.includes(r.collection) || !Array.isArray(r.sources)) continue;
+    for (const s of r.sources as { sourceName?: string; cited?: boolean }[]) {
+      if (s?.sourceName && s.cited !== false) sources.add(s.sourceName);
+    }
   }
   const last7 = countSince(rows, 7);
 
@@ -40,7 +43,8 @@ export default async function AuditPage() {
           <div className="eyebrow">Admin · append-only</div>
           <h1>Audit</h1>
           <p>
-            Every question, answer, model and source set, plus security events, in a SHA-256 hash chain. Changing any
+            Every question, answer, model and source set, plus security events (lockouts) and admin actions (uploads,
+            deletions, visibility and user changes), in a SHA-256 hash chain. Changing any
             past row breaks the chain.{total > rows.length ? ` Showing the latest ${rows.length} of ${total}.` : ""}
           </p>
         </div>
@@ -54,7 +58,7 @@ export default async function AuditPage() {
       <div className="stats">
         <div className="stat-card"><div className="eyebrow">Entries</div><b>{total}</b></div>
         <div className="stat-card"><div className="eyebrow">Chain</div><b className={chain.ok ? "ok" : "bad"}>{chain.ok ? "Verified" : "Broken"}</b></div>
-        <div className="stat-card"><div className="eyebrow">Sources cited</div><b className="accent">{sources.size}</b></div>
+        <div className="stat-card"><div className="eyebrow">Documents cited</div><b className="accent">{sources.size}</b></div>
         <div className="stat-card"><div className="eyebrow">Last 7 days</div><b>{last7}</b></div>
       </div>
 
@@ -96,17 +100,22 @@ export default async function AuditPage() {
               )}
               {rows.map((r) => {
                 const security = r.collection === "security";
-                const n = Array.isArray(r.sources) ? r.sources.length : 0;
+                const admin = r.collection === "admin";
+                const list = Array.isArray(r.sources) ? (r.sources as { cited?: boolean }[]) : [];
+                const cited = list.filter((s) => s?.cited !== false).length;
                 return (
                   <tr key={r.id}>
                     <td className="when">{fmt(r.createdAt)}</td>
                     <td className="mono" style={{ fontSize: 12 }}>{r.userEmail}</td>
                     <td>
                       {security && <span className="badge b-amber" style={{ marginBottom: 4 }}>security</span>}
-                      <div className="clip">{r.question.replace(/^\[security\]\s*/, "")}</div>
+                      {admin && <span className="badge b-blue" style={{ marginBottom: 4 }}>admin</span>}
+                      <div className="clip">{r.question.replace(/^\[(security|admin)\]\s*/, "")}</div>
                     </td>
                     <td><div className="clip muted">{r.answer}</div></td>
-                    <td className="num">{security ? "–" : n}</td>
+                    <td className="num" title={security || admin ? undefined : "cited / retrieved"}>
+                      {security || admin ? "–" : `${cited} / ${list.length}`}
+                    </td>
                     <td className="mono" style={{ fontSize: 12 }}>{r.model}</td>
                     <td className="mono faint" style={{ fontSize: 12 }} title={r.entryHash}>{r.entryHash.slice(0, 10)}</td>
                   </tr>

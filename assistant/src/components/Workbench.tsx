@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { FilePlus2, X } from "lucide-react";
 import { nextSourceName } from "@/lib/source-name";
@@ -20,6 +20,8 @@ interface Turn {
   done: boolean;
   piiRedacted: number;
   auditHash: string | null;
+  // 1-based numbers of the sources the answer cites; null while it streams.
+  cited: number[] | null;
   error?: string;
 }
 type IngestResult = { tone: "ok" | "warn" | "bad"; text: string };
@@ -59,6 +61,17 @@ export default function Workbench({ isAdmin, model }: { isAdmin: boolean; model:
   const questionRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
 
+  // The panel takes the focus when it opens; Esc closes it.
+  useEffect(() => {
+    if (!showIngest) return;
+    document.getElementById("ingest-file")?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowIngest(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showIngest]);
+
   function patchLast(fn: (t: Turn) => Turn) {
     setTurns((all) => (all.length ? [...all.slice(0, -1), fn(all[all.length - 1])] : all));
   }
@@ -68,7 +81,7 @@ export default function Workbench({ isAdmin, model }: { isAdmin: boolean; model:
     const question = q.trim();
     if (!question || asking) return;
     setSelected(turns.length);
-    setTurns((all) => [...all, { question, answer: "", sources: [], done: false, piiRedacted: 0, auditHash: null }]);
+    setTurns((all) => [...all, { question, answer: "", sources: [], done: false, piiRedacted: 0, auditHash: null, cited: null }]);
     setQ("");
     setAsking(true);
     try {
@@ -99,7 +112,7 @@ export default function Workbench({ isAdmin, model }: { isAdmin: boolean; model:
           const line = buf.slice(0, nl).trim();
           buf = buf.slice(nl + 1);
           if (!line) continue;
-          let ev: { type: string; sources?: Source[]; text?: string; error?: string; piiRedacted?: number; auditHash?: string | null };
+          let ev: { type: string; sources?: Source[]; text?: string; error?: string; piiRedacted?: number; auditHash?: string | null; cited?: number[] };
           try {
             ev = JSON.parse(line);
           } catch {
@@ -109,7 +122,7 @@ export default function Workbench({ isAdmin, model }: { isAdmin: boolean; model:
           else if (ev.type === "token") patchLast((t) => ({ ...t, answer: t.answer + (ev.text ?? "") }));
           else if (ev.type === "error") patchLast((t) => ({ ...t, error: ev.error ?? "Generation failed" }));
           else if (ev.type === "done")
-            patchLast((t) => ({ ...t, done: true, piiRedacted: ev.piiRedacted ?? 0, auditHash: ev.auditHash ?? null }));
+            patchLast((t) => ({ ...t, done: true, piiRedacted: ev.piiRedacted ?? 0, auditHash: ev.auditHash ?? null, cited: ev.cited ?? [] }));
         }
       }
       patchLast((t) => ({ ...t, done: true }));
@@ -269,13 +282,23 @@ export default function Workbench({ isAdmin, model }: { isAdmin: boolean; model:
                 <div className="bubble" aria-live={ti === turns.length - 1 ? "polite" : undefined}>
                   {t.answer || (!t.done && !t.error ? <span className="typing" aria-label="Generating"><i /><i /><i /></span> : null)}
                   {t.error && <div style={{ color: "var(--red)", marginTop: t.answer ? 8 : 0 }}>{t.error}</div>}
-                  {t.sources.length > 0 && (
+                  {t.sources.length > 0 && (t.cited === null || t.cited.length > 0) && (
                     <div className="cites">
-                      {t.sources.map((s, i) => (
-                        <a key={i} className="cite" href={`#chunk-${ti}-${i}`} onClick={() => setSelected(ti)} title={cite(s)}>
-                          [{i + 1}] {cite(s)}
-                        </a>
-                      ))}
+                      {/* While the answer streams, the retrieved passages show faintly; then only the cited ones. */}
+                      {t.sources.map((s, i) =>
+                        t.cited === null || t.cited.includes(i + 1) ? (
+                          <a
+                            key={i}
+                            className="cite"
+                            style={t.cited === null ? { opacity: 0.55 } : undefined}
+                            href={`#chunk-${ti}-${i}`}
+                            onClick={() => setSelected(ti)}
+                            title={cite(s)}
+                          >
+                            [{i + 1}] {cite(s)}
+                          </a>
+                        ) : null,
+                      )}
                     </div>
                   )}
                 </div>
@@ -283,7 +306,9 @@ export default function Workbench({ isAdmin, model }: { isAdmin: boolean; model:
               {t.done && !t.error && (
                 <div className="meta">
                   <span>Model <b>{model}</b></span>
-                  <span>{t.sources.length} source{t.sources.length === 1 ? "" : "s"}</span>
+                  <span>
+                    {t.cited?.length ?? 0} cited · {t.sources.length} retrieved
+                  </span>
                   {t.auditHash && (
                     <span>Audit entry <b title={t.auditHash}>{t.auditHash.slice(0, 12)}</b></span>
                   )}
@@ -330,7 +355,10 @@ export default function Workbench({ isAdmin, model }: { isAdmin: boolean; model:
               {current.sources.map((s, i) => (
                 <div className="chunk-target" id={`chunk-${selected}-${i}`} key={i}>
                   <pre className="code wrap" tabIndex={0} aria-label={`Source ${i + 1}: ${cite(s)}`}>
-                    <span className="c"># [{i + 1}]{typeof s.score === "number" ? ` score ${s.score.toFixed(2)}` : ""}</span>
+                    <span className="c">
+                      # [{i + 1}]{typeof s.score === "number" ? ` score ${s.score.toFixed(2)}` : ""}
+                      {current.cited ? (current.cited.includes(i + 1) ? " · cited" : " · not cited") : ""}
+                    </span>
                     {"\n"}<span className="k">doc</span>   <span className="s">{s.sourceName ?? "source"}</span>
                     {"\n"}<span className="k">chunk</span> {s.chunk != null ? `${s.chunk}${s.chunkOf ? ` of ${s.chunkOf}` : ""}` : "n/a"}
                     {"\n"}…{withMarkers(s.snippet ?? "")}…
