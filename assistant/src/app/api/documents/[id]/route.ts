@@ -51,8 +51,16 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   if ("error" in r) return r.error;
   const { session, doc, filter } = r;
 
+  // Rows from before documentIds share their points with any other row of the
+  // same name (a re-upload): those points stay until the last such row goes.
+  const sharesPoints =
+    doc.contentHash === null &&
+    (await prisma.document.count({
+      where: { id: { not: doc.id }, collection: doc.collection, sourceName: doc.sourceName, quarantined: false, contentHash: null },
+    })) > 0;
+
   let removed = 0;
-  if (!doc.quarantined) {
+  if (!doc.quarantined && !sharesPoints) {
     const res = await ragDeleteByFilter(doc.collection, filter);
     if (!res.ok) return Response.json({ error: `Could not remove the chunks: ${res.error}` }, { status: 502 });
     removed = res.count;
