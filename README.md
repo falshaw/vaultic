@@ -6,6 +6,8 @@ Vaultic is aimed at organisations that cannot send internal documents to a cloud
 
 **Status:** early pilot (v0). The core flow works; connectors, multi-tenancy and per-task models are not implemented.
 
+![Workbench: a cited answer from the demo incident procedure, dark theme](docs/workbench-dark.png)
+
 ## Architecture
 
 One `docker compose up` starts five services on a private bridge network (plus a one-shot model download). Only the assistant publishes a port, and only on `127.0.0.1`.
@@ -45,6 +47,13 @@ The bridge image installs no cloud-LLM CLI and mounts no credentials, so there i
 - **Login protection** - Postgres-backed per-IP rate limit (fail-open) and per-account lockout after 5 failures (fail-closed).
 - **Overview dashboard** - queries per day (last 7 days), documents indexed, threats blocked, PII redactions, audit-chain status, red-team and egress results, most-cited sources and recent activity, all computed from real rows. Non-admin users see only their own questions and documents visible to all.
 - **Light and dark theme** - follows the OS setting until you pick one in the sidebar; fonts are self-hosted, so the UI makes no external requests.
+
+## Screenshots
+
+| | |
+| --- | --- |
+| ![Overview, light theme](docs/overview-light.png) | ![Documents with a quarantined upload, light theme](docs/documents-light.png) |
+| ![Users page, light theme](docs/users-light.png) | ![Audit chain with admin and security events, light theme](docs/audit-light.png) |
 
 ## Tech stack
 
