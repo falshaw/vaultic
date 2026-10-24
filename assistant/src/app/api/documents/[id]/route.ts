@@ -71,7 +71,9 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     "document deleted",
     doc.quarantined
       ? `Quarantined upload "${doc.sourceName}" deleted.`
-      : `"${doc.sourceName}" deleted with ${removed} chunk${removed === 1 ? "" : "s"}.`,
+      : sharesPoints
+        ? `"${doc.sourceName}" deleted; its chunks stay for the other upload of the same name.`
+        : `"${doc.sourceName}" deleted with ${removed} chunk${removed === 1 ? "" : "s"}.`,
     { event: "document_deleted", documentId: doc.id, sourceName: doc.sourceName, chunksRemoved: removed },
   );
   return Response.json({ ok: true, chunksRemoved: removed });

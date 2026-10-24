@@ -138,9 +138,12 @@ export default function UsersAdmin({ users, selfId }: { users: UserRow[]; selfId
           <div className="field">
             <label className="label" htmlFor="new-role">Role</label>
             <select id="new-role" className="input" value={role} onChange={(e) => setRole(e.target.value as "admin" | "user")}>
-              <option value="user">user: asks questions, sees documents visible to all</option>
-              <option value="admin">admin: everything</option>
+              <option value="user">user</option>
+              <option value="admin">admin</option>
             </select>
+            <span className="faint" style={{ fontSize: 12, marginTop: 6 }}>
+              {role === "admin" ? "Every page and document." : "Asks questions; sees documents visible to all users."}
+            </span>
           </div>
         </div>
         <div>
@@ -171,7 +174,7 @@ export default function UsersAdmin({ users, selfId }: { users: UserRow[]; selfId
               {users.map((u) => (
                 <tr key={u.id}>
                   <td>
-                    <span className="src">{u.email}</span>
+                    <span className="src" style={{ whiteSpace: "nowrap" }}>{u.email}</span>
                     {u.id === selfId && <span className="faint"> (you)</span>}
                   </td>
                   <td>
