@@ -79,6 +79,10 @@ export async function POST(req: Request) {
 
   await clearAttempts(email);
 
+  if (user.disabled) {
+    return Response.json({ error: "This account is disabled. Ask an admin to enable it." }, { status: 403 });
+  }
+
   await createSession(
     { userId: user.id, email: user.email, role: user.role },
     req.headers.get("user-agent") ?? undefined,

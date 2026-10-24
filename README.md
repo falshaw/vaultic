@@ -33,10 +33,11 @@ The bridge image installs no cloud-LLM CLI and mounts no credentials, so there i
 
 ## Features
 
-- **Cited answers** - the model answers only from retrieved passages, and the UI links each answer to its sources.
+- **Cited answers** - the model answers only from retrieved passages. Passages scoring under half of the best one are dropped before generation; the answer shows the passages it actually cites, and the audit entry records each retrieved passage as cited or not. An answer the documents cannot support says so and cites nothing.
 - **Local hybrid reranking** - vector similarity blended with lexical overlap, deterministic, no extra model.
-- **Tamper-evident audit log** - every question, answer, model and source set is appended to a SHA-256 hash chain in Postgres; the Audit page verifies the chain.
-- **RBAC** - `admin` and `user` roles. Documents carry a visibility flag; non-admin users only retrieve documents marked visible to all. Ingest, documents, audit and security pages are admin-only.
+- **Tamper-evident audit log** - every question, answer, model and source set is appended to a SHA-256 hash chain in Postgres, together with login lockouts and admin actions (uploads, quarantines, deletions, visibility and user changes); the Audit page verifies the chain. A generation that fails or that the user abandons is recorded as such, never as a partial answer.
+- **Users and roles** - `admin` and `user` roles, managed on the Users page: create accounts, change roles, disable, unlock after a lockout, set a new password. Every change signs the user out at once. Documents carry a visibility flag; non-admin users only retrieve documents marked visible to all. Ingest, documents, users, audit and security pages are admin-only.
+- **Document management** - delete a document (its chunks leave the vector store) or change who can retrieve it after upload. The same content is not indexed twice: a re-upload names the existing document.
 - **Ingest guardrails** - PDF (via `unpdf`), TXT, Markdown, CSV and JSON. PII (emails, phone numbers, IBANs, Luhn-valid card numbers, US SSNs) is redacted before anything is stored; documents matching prompt-injection / RAG-poisoning patterns are quarantined.
 - **Red-team self-test** - runs a fixed set of injection, PII and benign cases against the guard and redactor and reports what is caught, including known misses.
 - **Egress containment** - the Security page lists every configured endpoint classified as internal/external and generates default-deny host firewall rules (iptables / nftables) that enforce it.
@@ -66,7 +67,7 @@ docker compose up -d --build
 docker compose logs -f vaultic-models   # first run: downloads the models, then exits
 ```
 
-Open http://127.0.0.1:3029 and log in with `VAULTIC_ADMIN_EMAIL` / `VAULTIC_ADMIN_PASSWORD` (the admin user is created on the first login while the user table is empty). In the **Workbench**, click **Add document**, upload one of the files in `demo-docs/` and ask a question about it, for example "How many hours does the firm have to submit the initial notification of a major ICT incident?".
+Open http://127.0.0.1:3029 and log in with `VAULTIC_ADMIN_EMAIL` / `VAULTIC_ADMIN_PASSWORD` (the admin user is created on the first login while the user table is empty). Further accounts are created on the **Users** page; Vaultic sends no email, so pass the password on yourself. In the **Workbench**, click **Add document**, upload one of the files in `demo-docs/` and ask a question about it, for example "How many hours does the firm have to submit the initial notification of a major ICT incident?".
 
 Stop with `docker compose down` (add `-v` to delete documents, audit log and models).
 
@@ -114,7 +115,7 @@ All settings come from `.env` (see `.env.example`):
 | `OLLAMA_CPUS` | no | CPU cores for the bundled Ollama (default `6`). Sets the container limit and the thread count sent with every request; set `0` when using an external Ollama |
 | `TRUST_PROXY` | no | `true` only behind a trusted reverse proxy |
 
-The assistant also reads `OLLAMA_TIMEOUT_MS` (default 300000) and `OLLAMA_KEEP_ALIVE` (default `30m`).
+The assistant also reads `OLLAMA_TIMEOUT_MS` (default 300000) and `OLLAMA_KEEP_ALIVE` (default `5m`: how long the model stays in memory after a question; a 7B model holds about 5 GB, so a longer value trades RAM for skipping the reload).
 
 ## Demo data
 
@@ -141,7 +142,19 @@ npm run dev            # http://localhost:3029
 
 - `pii.test.ts`: email, IBAN (spaced and contiguous), Luhn-valid card, US SSN and phone redaction; no false positives on dates and section numbers; the streaming redactor never emits part of a PII value split across model tokens.
 - `chunk.test.ts`: the bridge's sentence-window chunker (`bridge/chunk.mjs`): size limit, sentence-boundary cuts, overlap, no lost text, no empty chunks.
-- `metrics.test.ts`: the Overview's 7-day buckets, redaction-marker counts, most-cited sources and the per-role scoping (a non-admin never sees other users' questions or admin-only documents).
+- `metrics.test.ts`: the Overview's 7-day buckets, redaction-marker counts, most-cited sources (uncited passages excluded) and the per-role scoping (a non-admin never sees other users' questions, admin events, admin-only documents or quarantined uploads).
+- `citations.test.ts`: the relative relevance cut-off and reading `[n]` citations from an answer.
+- `users.test.ts`: password rules, and that an admin can neither lock themselves out nor remove the last active admin.
+
+## Limits
+
+- **Pattern-based guards.** Prompt-injection screening and PII redaction match patterns; the red-team self-test lists what they miss (letter-spaced and Base64-encoded attacks). Names, addresses and free-text personal data are not redacted.
+- **No OCR.** Scanned PDFs without a text layer are refused.
+- **Relevance is relative.** The cut-off keeps passages scoring at least half of the best one in the same search, so a question no document answers still retrieves its closest passages; the model is told to say when they do not contain the answer, and the answer then cites nothing.
+- **CPU by default.** A 7B model answers in roughly 10 to 60 seconds on a laptop CPU; the GPU override is optional.
+- **No email, no SSO.** Accounts are created by an admin with a password; there is no self-service reset.
+- **One organisation, one node.** No multi-tenancy, and login throttling and the audit chain assume a single assistant instance.
+- **Early pilot.** Not externally audited; the evidence pack shows how the controls support the listed frameworks, it is not a certification.
 
 ## Container hardening
 

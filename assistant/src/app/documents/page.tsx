@@ -3,6 +3,7 @@ import Link from "next/link";
 import { getSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import Shell from "@/components/Shell";
+import DocumentActions from "@/components/DocumentActions";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Documents" };
@@ -53,12 +54,13 @@ export default async function DocumentsPage() {
                 <th>Chunks</th>
                 <th>PII</th>
                 <th>Status</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {docs.length === 0 && (
                 <tr>
-                  <td colSpan={6}>
+                  <td colSpan={7}>
                     <div className="empty">
                       <b>No documents yet</b>
                       Add one from the Workbench.
@@ -88,6 +90,9 @@ export default async function DocumentsPage() {
                       ) : (
                         <span className="badge b-teal">indexed</span>
                       )}
+                    </td>
+                    <td>
+                      <DocumentActions id={d.id} name={d.sourceName} visibility={d.visibility} quarantined={d.quarantined} />
                     </td>
                   </tr>
                 );

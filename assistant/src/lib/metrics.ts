@@ -1,5 +1,5 @@
 import { prisma } from "./prisma";
-import { verifyChain, type ChainStatus } from "./audit";
+import { EVENT_COLLECTIONS, verifyChain, type ChainStatus } from "./audit";
 import { runRedTeam } from "./redteam";
 import { getEgressManifest } from "./egress";
 
@@ -70,9 +70,11 @@ export function topSources(entries: { sources: unknown }[], limit = 5): BarItem[
   for (const e of entries) {
     if (!Array.isArray(e.sources)) continue;
     // Count each document once per answer, even when several of its chunks were cited.
+    // Retrieved-but-uncited passages (cited: false) do not count; entries written
+    // before the flag existed count every source.
     const names = new Set<string>();
-    for (const s of e.sources as { sourceName?: unknown }[]) {
-      if (s && typeof s.sourceName === "string") names.add(s.sourceName);
+    for (const s of e.sources as { sourceName?: unknown; cited?: unknown }[]) {
+      if (s && typeof s.sourceName === "string" && s.cited !== false) names.add(s.sourceName);
     }
     for (const n of names) counts.set(n, (counts.get(n) ?? 0) + 1);
   }
@@ -95,12 +97,13 @@ export interface Viewer {
  */
 export function scopeForViewer<
   A extends { userId: string | null; collection: string },
-  D extends { visibility: string },
+  D extends { visibility: string; quarantined: boolean },
 >(viewer: Viewer, audit: A[], docs: D[]): { audit: A[]; docs: D[] } {
   if (viewer.role === "admin") return { audit, docs };
   return {
-    audit: audit.filter((a) => a.collection !== "security" && a.userId === viewer.userId),
-    docs: docs.filter((d) => d.visibility === "all"),
+    audit: audit.filter((a) => !EVENT_COLLECTIONS.includes(a.collection) && a.userId === viewer.userId),
+    // A quarantined upload never reached retrieval; its name and matched rules are for admins.
+    docs: docs.filter((d) => d.visibility === "all" && !d.quarantined),
   };
 }
 
@@ -114,14 +117,16 @@ export async function getDashboard(viewer: Viewer): Promise<Dashboard> {
 
   // Security events (login lockouts) share the tamper-evident chain but are not
   // questions, so they stay out of the query counts.
-  const qa = audit.filter((a) => a.collection !== "security");
+  const qa = audit.filter((a) => !EVENT_COLLECTIONS.includes(a.collection));
   const week = weekBars(qa.map((a) => a.createdAt));
 
   const redteam = runRedTeam();
   const egress = getEgressManifest();
 
   const activity: Activity[] = [
-    ...audit.map((a): Activity => {
+    // Admin events (uploads, deletes, user changes) show as the document rows below
+    // or on the Audit page; the activity feed keeps questions and security events.
+    ...audit.filter((a) => a.collection !== "admin").map((a): Activity => {
       if (a.collection === "security") {
         return { at: a.createdAt, kind: "security", title: a.question.replace(/^\[security\]\s*/, ""), detail: a.userEmail };
       }

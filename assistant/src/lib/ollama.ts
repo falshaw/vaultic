@@ -6,8 +6,9 @@ export const GEN_MODEL = process.env.GEN_MODEL ?? "qwen2.5:7b";
 // A cold model load into VRAM can take 30-60s+ before the first byte; keep the
 // ceiling generous and OWN it (don't rely on undici's defaults).
 const GEN_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS ?? 300_000);
-// Keep the model resident so subsequent queries skip the cold start.
-const KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE ?? "30m";
+// How long the model stays in RAM after a question (Ollama's own default). A
+// 7B model holds ~5 GB; a longer value skips the reload but keeps that memory.
+const KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE ?? "5m";
 
 async function chatOnce(system: string, prompt: string): Promise<string> {
   const res = await fetch(`${OLLAMA_URL}/api/chat`, {
@@ -106,12 +107,18 @@ export async function generate(system: string, prompt: string): Promise<string> 
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
-async function openChatStream(system: string, prompt: string): Promise<ReadableStream<Uint8Array>> {
+async function openChatStream(
+  system: string,
+  prompt: string,
+  signal?: AbortSignal,
+): Promise<ReadableStream<Uint8Array>> {
+  const timeout = AbortSignal.timeout(GEN_TIMEOUT_MS);
   const res = await fetch(`${OLLAMA_URL}/api/chat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     cache: "no-store",
-    signal: AbortSignal.timeout(GEN_TIMEOUT_MS),
+    // Aborting the request makes Ollama stop generating.
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     body: JSON.stringify({
       model: GEN_MODEL,
       stream: true,
@@ -134,14 +141,15 @@ async function openChatStream(system: string, prompt: string): Promise<ReadableS
  * Stream the answer token-by-token from the local model (ollama NDJSON).
  * Cold-load drops are retried ONLY before the first token is yielded — once
  * tokens flow a mid-stream failure is surfaced, not silently restarted.
+ * `signal` (the browser went away) stops generation and is never retried.
  */
-export async function* generateStream(system: string, prompt: string): AsyncGenerator<string> {
+export async function* generateStream(system: string, prompt: string, signal?: AbortSignal): AsyncGenerator<string> {
   if (isCircuitOpen()) throw new Error("Ollama circuit breaker is open");
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     let yielded = false;
     try {
-      const body = await openChatStream(system, prompt);
+      const body = await openChatStream(system, prompt, signal);
       // The stream opened, so ollama is reachable — clear the breaker now rather
       // than at stream end, which may never come if the client disconnects.
       recordSuccess();
@@ -172,6 +180,7 @@ export async function* generateStream(system: string, prompt: string): AsyncGene
         }
       }
     } catch (e) {
+      if (signal?.aborted) throw e instanceof Error ? e : new Error(String(e));
       if (!isTransient(e) || attempt === 3 || yielded) {
         // A mid-stream failure after tokens flowed is not an availability signal.
         if (!yielded) recordFailure();

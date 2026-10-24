@@ -55,3 +55,31 @@ export async function ragSearch(
     payload: (h.payload ?? {}) as RagHit["payload"],
   }));
 }
+
+/** Points of one document: by its id, or by source name for points indexed before ids were stored. */
+export function documentFilter(doc: { id: string; sourceName: string; legacy?: boolean }): RagFilter {
+  return doc.legacy
+    ? { must: [{ key: "sourceName", match: { value: doc.sourceName } }] }
+    : { must: [{ key: "documentId", match: { value: doc.id } }] };
+}
+
+async function byFilter(path: string, body: Record<string, unknown>): Promise<{ ok: boolean; count: number; error?: string }> {
+  const res = await fetch(`${BRIDGE_URL}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-app-name": "vaultic" },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || !json.ok) return { ok: false, count: 0, error: json.error ?? `bridge HTTP ${res.status}` };
+  return { ok: true, count: json.count ?? 0 };
+}
+
+/** Remove every point matching the filter (e.g. all chunks of one document). */
+export function ragDeleteByFilter(collection: string, filter: RagFilter) {
+  return byFilter("/rag/delete-by-filter", { collection, filter });
+}
+
+/** Merge payload keys into every point matching the filter (e.g. a new visibility). */
+export function ragSetPayload(collection: string, filter: RagFilter, payload: Record<string, unknown>) {
+  return byFilter("/rag/set-payload", { collection, filter, payload });
+}

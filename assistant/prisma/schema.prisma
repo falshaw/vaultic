@@ -17,6 +17,8 @@ model User {
   email        String     @unique
   passwordHash String
   role         Role       @default(user)
+  // A disabled user cannot sign in; disabling also ends their sessions.
+  disabled     Boolean    @default(false)
   createdAt    DateTime   @default(now())
   sessions     Session[]
   auditLogs    AuditLog[]
@@ -74,8 +76,11 @@ model Document {
   quarantined       Boolean  @default(false) // injection/poisoning suspected → NOT indexed
   piiRedactions     Int      @default(0)
   injectionFindings Json? // [{ rule, severity, excerpt }]
+  // SHA-256 of the redacted text: the same content is not indexed twice.
+  contentHash       String?
 
   @@index([collection])
+  @@index([contentHash])
 }
 
 /// Brute-force protection state for the login route. Postgres-backed because
