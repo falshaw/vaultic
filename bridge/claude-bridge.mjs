@@ -1474,8 +1474,8 @@ async function handleReload(_req, res, ctx) {
 
 // =============================================================================
 // OpenAI-compatible chat shim  (POST /v1/chat/completions)
-// Lets OpenAI/Ollama-protocol clients (e.g. the OpenHuman core) route their LLM
-// calls through this bridge → Claude Max. Translates the OpenAI request into
+// Lets OpenAI/Ollama-protocol clients route their LLM calls through this
+// bridge's claude CLI path (when the CLI is installed). Translates the OpenAI request into
 // callClaude() and wraps the reply in OpenAI chat-completion shape. Supports
 // fake-streaming for stream:true clients. Tool-calling is NOT supported: any
 // `tools` are ignored and a plain assistant message is returned (clients that
@@ -1588,8 +1588,8 @@ async function handleOpenAIChat(req, res, ctx) {
 // =============================================================================
 // OpenAI-compatible embeddings shim  (POST /v1/embeddings)
 // Routes a client's embedding requests through the bridge's local Ollama
-// embedder (nomic-embed-text). Keeps OpenHuman's memory layer working when its
-// OPENHUMAN_OLLAMA_BASE_URL points here instead of Ollama directly.
+// embedder (nomic-embed-text). Keeps a client's memory layer working when its
+// Ollama base URL points here instead of Ollama directly.
 // =============================================================================
 async function handleOpenAIEmbeddings(req, res, ctx) {
   const body = await parseJsonBody(req, res, ctx.requestId);
@@ -1639,7 +1639,7 @@ const server = createServer(async (req, res) => {
   const ctx = getRequestContext(req);
   const isPublic =
     (req.method === "GET" && (req.url === "/health" || req.url === "/metrics")) ||
-    // OpenAI-compatible shim: clients like the OpenHuman core use
+    // OpenAI-compatible shim: OpenAI-protocol clients use
     // CompatAuthStyle::None (no bearer). The bridge is loopback/internal-only,
     // so /v1/* is exempt from the bridge token.
     (typeof req.url === "string" && req.url.startsWith("/v1/"));
